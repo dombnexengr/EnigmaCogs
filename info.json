@@ -1,13 +1,13 @@
 {
     "$schema": "https://raw.githubusercontent.com/Cog-Creators/Red-DiscordBot/V3/develop/schema/red_cog_repo.schema.json",
     "author": [
-        "Zephyrkul (Zephyrkul#1089)"
+        "EnigmaCom"
     ],
-    "install_msg": "Thank you and commiserations for installing FluffyCogs.\nIf you need support, find me in #support-fluffycogs at Red's cog support server: https://discord.gg/GET4DVk",
-    "name": "FluffyCogs",
-    "short": "Only the fluffiest of cogs go here.",
-    "description": "My cogs for utility, requests, or proof-of-concepts. Or memes, as is the case with the skyrim cog.",
+    "install_msg": "Thank you and commiserations for installing EnigmaCogs.",
+    "name": "EnigmaCogs",
+    "short": "Only the enigmatic of cogs go here.",
+    "description": "My cogs for utility, requests, or proof-of-concepts. Or memes, as is the case with the Streams cog.",
     "tags": [
-        "fluffy"
+        "enigma"
     ]
 }
