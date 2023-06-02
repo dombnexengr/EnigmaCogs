@@ -17,8 +17,6 @@ To install:
 > [p]help &lt;Cog&gt;
 
 
-You can find support for these cogs in [#support-fluffycogs](https://discord.com/channels/240154543684321280/902011844439457824) at the [Red cog support server](https://discord.gg/GET4DVk).
-
 ## Credits
 
 [Zephyrkul](https://github.com/Zephyrkul)
