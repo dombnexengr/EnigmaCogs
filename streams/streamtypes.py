@@ -1,32 +1,33 @@
+import asyncio
 import contextlib
 import json
 import logging
-import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta, timezone
+import time
+from dateutil.parser import parse as parse_time
 from random import choice
 from string import ascii_letters
-from typing import ClassVar, List, Optional
+from datetime import datetime, timedelta, timezone
+import xml.etree.ElementTree as ET
+from typing import ClassVar, Optional, List, Tuple
 
 import aiohttp
 import discord
-from dateutil.parser import parse as parse_time
-from redbot.core.i18n import Translator
-from redbot.core.utils.chat_formatting import humanize_number, humanize_timedelta
 
 from .errors import (
     APIError,
-    InvalidTrovoCredentials,
+    OfflineStream,
     InvalidTwitchCredentials,
     InvalidYoutubeCredentials,
-    OfflineStream,
     StreamNotFound,
     YoutubeQuotaExceeded,
 )
+from redbot.core.i18n import Translator
+from redbot.core.utils.chat_formatting import humanize_number, humanize_timedelta
 
 TWITCH_BASE_URL = "https://api.twitch.tv"
 TWITCH_ID_ENDPOINT = TWITCH_BASE_URL + "/helix/users"
 TWITCH_STREAMS_ENDPOINT = TWITCH_BASE_URL + "/helix/streams/"
-TWITCH_COMMUNITIES_ENDPOINT = TWITCH_BASE_URL + "/helix/communities"
+TWITCH_FOLLOWS_ENDPOINT = TWITCH_ID_ENDPOINT + "/follows"
 
 YOUTUBE_BASE_URL = "https://www.googleapis.com/youtube/v3"
 YOUTUBE_CHANNELS_ENDPOINT = YOUTUBE_BASE_URL + "/channels"
@@ -40,7 +41,7 @@ TROVO_CHANNELINFO_ENDPOINT = TROVO_BASE_URL + "/channels/id"
 
 _ = Translator("Streams", __file__)
 
-log = logging.getLogger("red.fluffy.streams.StreamTypes")
+log = logging.getLogger("red.core.cogs.Streams")
 
 
 def rnd(url):
@@ -58,28 +59,49 @@ def get_video_ids_from_feed(feed):
 
 class Stream:
     token_name: ClassVar[Optional[str]] = None
+    platform_name: ClassVar[Optional[str]] = None
 
     def __init__(self, **kwargs):
+        self._bot = kwargs.pop("_bot")
         self.name = kwargs.pop("name", None)
         self.channels = kwargs.pop("channels", [])
         # self.already_online = kwargs.pop("already_online", False)
-        self._messages_cache = kwargs.pop("_messages_cache", [])
+        self.messages = kwargs.pop("messages", [])
         self.type = self.__class__.__name__
+        # Keep track of how many failed consecutive attempts we had at checking
+        # if the stream's channel actually exists.
+        self.retry_count = 0
+
+    @property
+    def display_name(self) -> Optional[str]:
+        return self.name
 
     async def is_online(self):
         raise NotImplementedError()
 
     def make_embed(self):
         raise NotImplementedError()
+    
+    def iter_messages(self):
+        for msg_data in self.messages:
+            data = msg_data.copy()
+            # "guild" key might not exist for old config data (available since GH-4742)
+            if guild_id := msg_data.get("guild"):
+                guild = self._bot.get_guild(guild_id)
+                channel = guild and guild.get_channel(msg_data["channel"])
+            else:
+                channel = self._bot.get_channel(msg_data["channel"])
+
+            data["partial_message"] = (
+                channel.get_partial_message(data["message"]) if channel is not None else None
+            )
+            yield data
 
     def export(self):
         data = {}
         for k, v in self.__dict__.items():
             if not k.startswith("_"):
                 data[k] = v
-        data["messages"] = []
-        for m in self._messages_cache:
-            data["messages"].append({"channel": m.channel.id, "message": m.id})
         return data
 
     def __repr__(self):
@@ -88,6 +110,7 @@ class Stream:
 
 class YoutubeStream(Stream):
     token_name = "youtube"
+    platform_name = "YouTube"
 
     def __init__(self, **kwargs):
         self.id = kwargs.pop("id", None)
@@ -97,7 +120,7 @@ class YoutubeStream(Stream):
         self.livestreams: List[str] = []
 
         super().__init__(**kwargs)
-
+    
     async def is_online(self):
         if not self._token:
             raise InvalidYoutubeCredentials("YouTube API key is not set.")
@@ -109,14 +132,20 @@ class YoutubeStream(Stream):
 
         async with aiohttp.ClientSession() as session:
             async with session.get(YOUTUBE_CHANNEL_RSS.format(channel_id=self.id)) as r:
+                if r.status == 404:
+                    raise StreamNotFound()
                 rssdata = await r.text()
+
+        # Reset the retry count since we successfully got information about this
+        # channel's streams
+        self.retry_count = 0
 
         if self.not_livestreams:
             self.not_livestreams = list(dict.fromkeys(self.not_livestreams))
 
         if self.livestreams:
             self.livestreams = list(dict.fromkeys(self.livestreams))
-
+    
         for video_id in get_video_ids_from_feed(rssdata):
             if video_id in self.not_livestreams:
                 log.debug(f"video_id in not_livestreams: {video_id}")
@@ -130,7 +159,24 @@ class YoutubeStream(Stream):
             async with aiohttp.ClientSession() as session:
                 async with session.get(YOUTUBE_VIDEOS_ENDPOINT, params=params) as r:
                     data = await r.json()
-                    stream_data = data.get("items", [{}])[0].get("liveStreamingDetails", {})
+                    try:
+                        self._check_api_errors(data)
+                    except InvalidYoutubeCredentials:
+                        log.error("The YouTube API key is either invalid or has not been set.")
+                        break
+                    except YoutubeQuotaExceeded:
+                        log.error("YouTube quota has been exceeded.")
+                        break
+                    except APIError as e:
+                        log.error(
+                            "Something went wrong whilst trying to"
+                            " contact the stream service's API.\n"
+                            "Raw response data:\n%r",
+                            e,
+                        )
+                        continue
+                    video_data = data.get("items", [{}])[0]
+                    stream_data = video_data.get("liveStreamingDetails", {})
                     log.debug(f"stream_data for {video_id}: {stream_data}")
                     if (
                         stream_data
@@ -146,16 +192,18 @@ class YoutubeStream(Stream):
                         elif actual_start_time is None:
                             continue
                         if video_id not in self.livestreams:
-                            self.livestreams.append(data["items"][0]["id"])
+                            self.livestreams.append(video_id)
                     else:
-                        self.not_livestreams.append(data["items"][0]["id"])
+                        self.not_livestreams.append(video_id)
                         if video_id in self.livestreams:
                             self.livestreams.remove(video_id)
-        log.debug(f"livestreams for {self.name}: {self.livestreams}")
-        log.debug(f"not_livestreams for {self.name}: {self.not_livestreams}")
+        log.debug(f"livestreams for %s: %s", self.name, self.livestreams)
+        log.debug(f"not_livestreams for %s: %s", self.name, self.not_livestreams)
+
         # This is technically redundant since we have the
         # info from the RSS ... but incase you don't wanna deal with fully rewritting the
         # code for this part, as this is only a 2 quota query.
+        
         if self.livestreams:
             params = {
                 "key": self._token["api_key"],
@@ -193,17 +241,21 @@ class YoutubeStream(Stream):
                 embed.timestamp = start_time
                 is_schedule = True
             else:
-                # repost message
+                # delete the message(s) about the stream schedule
                 to_remove = []
-                for message in self._messages_cache:
-                    if message.embeds[0].description is discord.Embed.Empty:
+                for msg_data in self.iter_messages():
+                    if not msg_data.get("is_schedule", False):
                         continue
-                    with contextlib.suppress(Exception):
-                        autodelete = await self._config.guild(message.guild).autodelete()
+                    partial_msg = msg_data["partial_message"]
+                    if partial_msg is not None:
+                        autodelete = await self._config.guild(partial_msg.guild).autodelete()
                         if autodelete:
-                            await message.delete()
-                    to_remove.append(message.id)
-                self._messages_cache = [x for x in self._messages_cache if x.id not in to_remove]
+                            with contextlib.suppress(discord.NotFound):
+                                await partial_msg.delete()
+                    to_remove.append(msg_data["message"])
+                self.messages = [
+                    data for data in self.messages if data["message"] not in to_remove
+                ]
         embed.set_author(name=channel_title)
         embed.set_image(url=rnd(thumbnail))
         embed.colour = 0x9255A5
@@ -227,6 +279,20 @@ class YoutubeStream(Stream):
             async with session.get(YOUTUBE_CHANNELS_ENDPOINT, params=params) as r:
                 data = await r.json()
 
+        self._check_api_errors(data)
+        if "items" in data and len(data["items"]) == 0:
+            raise StreamNotFound()
+        elif "items" in data:
+            return data["items"][0][resource]
+        elif (
+            "pageInfo" in data
+            and "totalResults" in data["pageInfo"]
+            and data["pageInfo"]["totalResults"] < 1
+        ):
+            raise StreamNotFound()
+        raise APIError(r.status, data)
+    
+    def _check_api_errors(self, data: dict):
         if "error" in data:
             error_code = data["error"]["code"]
             if error_code == 400 and data["error"]["errors"][0]["reason"] == "keyInvalid":
@@ -237,17 +303,7 @@ class YoutubeStream(Stream):
                 "rateLimitExceeded",
             ):
                 raise YoutubeQuotaExceeded()
-        elif "items" in data and len(data["items"]) == 0:
-            raise StreamNotFound()
-        elif "items" in data:
-            return data["items"][0][resource]
-        elif (
-            "pageInfo" in data
-            and "totalResults" in data["pageInfo"]
-            and data["pageInfo"]["totalResults"] < 1
-        ):
-            raise StreamNotFound()
-        raise APIError(data)
+            raise APIError(error_code, data)
 
     def __repr__(self):
         return "<{0.__class__.__name__}: {0.name} (ID: {0.id})>".format(self)
