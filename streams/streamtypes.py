@@ -523,10 +523,13 @@ class PicartoStream(Stream):
 
 class TrovoStream(Stream):
     token_name = "trovo"
+    platform_name = "Trovo"
 
     def __init__(self, **kwargs):
         self.id = kwargs.pop("id", None)
-        self._client_id = kwargs.pop("token").get("client_id")
+        self._display_name = None
+        self._client_id = kwargs.pop("token", None)
+        self._bearer = kwargs.pop("bearer", None)
         super().__init__(**kwargs)
 
     async def is_online(self):
