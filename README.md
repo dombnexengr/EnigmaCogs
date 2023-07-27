@@ -4,25 +4,23 @@
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/ambv/black)
 [![pre-commit.ci status](https://results.pre-commit.ci/badge/github/Zephyrkul/FluffyCogs/master.svg)](https://results.pre-commit.ci/latest/github/Zephyrkul/FluffyCogs/master)
 
-
-
 ## Installation
 
 To install:
 
 > [p]repo add EnigmaCogsDev https://github.com/dombnexengr/EnigmaCogs develop
-> 
+>
 > [p]cog list EnigmaCogsDev
-> 
+>
 > [p]cog install EnigmaCogsDev <cogs...>
-> 
+>
 > [p]load <cog_name>
-> 
+>
 > [p]help <cog_name>
 
-
 ## Credits
-[Obi-Wan3](https://github.com/Obi-Wan3/OB13-Cogs/tree/main/botaccess)
+
+[Obi-Wan3](https://github.com/Obi-Wan3) - Developer of [botaccess cog](https://github.com/Obi-Wan3/OB13-Cogs/tree/main/botaccess)
 
 [Zephyrkul](https://github.com/Zephyrkul)
 
