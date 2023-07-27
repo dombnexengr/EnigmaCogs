@@ -1,7 +1,13 @@
 [tool.black]
-    line-length = 99
-    target-version = ['py38']
-    include = '\.pyi?$'
+line-length = 99
+required-version = '23'
+target-version = ['py38']
+include = '\.py$'
+force-exclude = '''
+/(
+    redbot\/vendored
+)/
+'''
 
 [tool.pyright]
     pythonVersion = '3.8'
