@@ -64,7 +64,7 @@ class Stream:
     platform_name: ClassVar[Optional[str]] = None
 
     def __init__(self, **kwargs):
-        self._bot = kwargs.pop("bot")
+        self._bot = kwargs.pop("_bot")
         self.name = kwargs.pop("name", None)
         self.channels = kwargs.pop("channels", [])
         # self.already_online = kwargs.pop("already_online", False)
