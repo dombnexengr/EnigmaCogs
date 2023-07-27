@@ -528,7 +528,8 @@ class TrovoStream(Stream):
     def __init__(self, **kwargs):
         self.id = kwargs.pop("id", None)
         self._display_name = None
-        self._client_id = kwargs.pop("token").get("client_id")
+        self._client_id = kwargs.pop("token")
+        print(self._client_id)
         super().__init__(**kwargs)
 
     async def is_online(self):
