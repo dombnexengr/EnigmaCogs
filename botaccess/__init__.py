@@ -1,3 +1,4 @@
+from redbot.core.bot import Red
 import json
 from pathlib import Path
 from .botaccess import BotAccess
