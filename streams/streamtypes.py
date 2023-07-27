@@ -19,6 +19,7 @@ from .errors import (
     InvalidTwitchCredentials,
     InvalidYoutubeCredentials,
     StreamNotFound,
+    InvalidTrovoCredentials,
     YoutubeQuotaExceeded,
 )
 from redbot.core.i18n import Translator
@@ -58,6 +59,7 @@ def get_video_ids_from_feed(feed):
 
 
 class Stream:
+
     token_name: ClassVar[Optional[str]] = None
     platform_name: ClassVar[Optional[str]] = None
 
@@ -81,7 +83,7 @@ class Stream:
 
     def make_embed(self):
         raise NotImplementedError()
-    
+
     def iter_messages(self):
         for msg_data in self.messages:
             data = msg_data.copy()
@@ -109,6 +111,7 @@ class Stream:
 
 
 class YoutubeStream(Stream):
+
     token_name = "youtube"
     platform_name = "YouTube"
 
@@ -120,7 +123,7 @@ class YoutubeStream(Stream):
         self.livestreams: List[str] = []
 
         super().__init__(**kwargs)
-    
+
     async def is_online(self):
         if not self._token:
             raise InvalidYoutubeCredentials("YouTube API key is not set.")
@@ -145,7 +148,7 @@ class YoutubeStream(Stream):
 
         if self.livestreams:
             self.livestreams = list(dict.fromkeys(self.livestreams))
-    
+
         for video_id in get_video_ids_from_feed(rssdata):
             if video_id in self.not_livestreams:
                 log.debug(f"video_id in not_livestreams: {video_id}")
@@ -197,13 +200,11 @@ class YoutubeStream(Stream):
                         self.not_livestreams.append(video_id)
                         if video_id in self.livestreams:
                             self.livestreams.remove(video_id)
-        log.debug(f"livestreams for %s: %s", self.name, self.livestreams)
-        log.debug(f"not_livestreams for %s: %s", self.name, self.not_livestreams)
-
+        log.debug(f"livestreams for {self.name}: {self.livestreams}")
+        log.debug(f"not_livestreams for {self.name}: {self.not_livestreams}")
         # This is technically redundant since we have the
         # info from the RSS ... but incase you don't wanna deal with fully rewritting the
         # code for this part, as this is only a 2 quota query.
-        
         if self.livestreams:
             params = {
                 "key": self._token["api_key"],
@@ -291,7 +292,7 @@ class YoutubeStream(Stream):
         ):
             raise StreamNotFound()
         raise APIError(r.status, data)
-    
+
     def _check_api_errors(self, data: dict):
         if "error" in data:
             error_code = data["error"]["code"]
@@ -310,105 +311,136 @@ class YoutubeStream(Stream):
 
 
 class TwitchStream(Stream):
+
     token_name = "twitch"
+    platform_name = "Twitch"
 
     def __init__(self, **kwargs):
         self.id = kwargs.pop("id", None)
+        self._display_name = None
         self._client_id = kwargs.pop("token", None)
         self._bearer = kwargs.pop("bearer", None)
+        self._rate_limit_resets: set = set()
+        self._rate_limit_remaining: int = 0
         super().__init__(**kwargs)
 
-    async def is_online(self):
-        if not self.id:
-            self.id = await self.fetch_id()
+    @property
+    def display_name(self) -> Optional[str]:
+        return self._display_name or self.name
 
-        url = TWITCH_STREAMS_ENDPOINT
+    @display_name.setter
+    def display_name(self, value: str) -> None:
+        self._display_name = value
+
+    async def wait_for_rate_limit_reset(self) -> None:
+        """Check rate limits in response header and ensure we're following them.
+
+        From python-twitch-client and adaptated to asyncio from Trusty-cogs:
+        https://github.com/tsifrer/python-twitch-client/blob/master/twitch/helix/base.py
+        https://github.com/TrustyJAID/Trusty-cogs/blob/master/twitch/twitch_api.py
+        """
+        current_time = int(time.time())
+        self._rate_limit_resets = {x for x in self._rate_limit_resets if x > current_time}
+
+        if self._rate_limit_remaining == 0:
+            if self._rate_limit_resets:
+                reset_time = next(iter(self._rate_limit_resets))
+                # Calculate wait time and add 0.1s to the wait time to allow Twitch to reset
+                # their counter
+                wait_time = reset_time - current_time + 0.1
+                await asyncio.sleep(wait_time)
+
+    async def get_data(self, url: str, params: dict = {}) -> Tuple[Optional[int], dict]:
         header = {"Client-ID": str(self._client_id)}
         if self._bearer is not None:
-            header = {**header, "Authorization": f"Bearer {self._bearer}"}
-        params = {"user_id": self.id}
-
+            header["Authorization"] = f"Bearer {self._bearer}"
+        await self.wait_for_rate_limit_reset()
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=header, params=params) as r:
-                data = await r.json(encoding="utf-8")
-        if r.status == 200:
-            if not data["data"]:
+            try:
+                async with session.get(url, headers=header, params=params, timeout=60) as resp:
+                    remaining = resp.headers.get("Ratelimit-Remaining")
+                    if remaining:
+                        self._rate_limit_remaining = int(remaining)
+                    reset = resp.headers.get("Ratelimit-Reset")
+                    if reset:
+                        self._rate_limit_resets.add(int(reset))
+
+                    if resp.status == 429:
+                        log.info(
+                            "Ratelimited. Trying again at %s.", datetime.fromtimestamp(int(reset))
+                        )
+                        resp.release()
+                        return await self.get_data(url)
+
+                    if resp.status != 200:
+                        return resp.status, {}
+
+                    return resp.status, await resp.json(encoding="utf-8")
+            except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as exc:
+                log.warning("Connection error occurred when fetching Twitch stream", exc_info=exc)
+                return None, {}
+
+    async def is_online(self):
+        user_profile_data = None
+        if self.id is None:
+            user_profile_data = await self._fetch_user_profile()
+
+        stream_code, stream_data = await self.get_data(
+            TWITCH_STREAMS_ENDPOINT, {"user_id": self.id}
+        )
+        if stream_code == 200:
+            if not stream_data["data"]:
                 raise OfflineStream()
-            self.name = data["data"][0]["user_name"]
-            data = data["data"][0]
-            data["game_name"] = None
-            data["followers"] = None
-            data["view_count"] = None
-            data["profile_image_url"] = None
-            data["login"] = None
 
-            game_id = data["game_id"]
-            if game_id:
-                params = {"id": game_id}
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(
-                        "https://api.twitch.tv/helix/games",
-                        headers=header,
-                        params=params,
-                    ) as r:
-                        game_data = await r.json(encoding="utf-8")
-                if game_data:
-                    game_data = game_data["data"][0]
-                    data["game_name"] = game_data["name"]
-            params = {"to_id": self.id}
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    "https://api.twitch.tv/helix/users/follows",
-                    headers=header,
-                    params=params,
-                ) as r:
-                    user_data = await r.json(encoding="utf-8")
-            if user_data:
-                followers = user_data["total"]
-                data["followers"] = followers
+            if user_profile_data is None:
+                user_profile_data = await self._fetch_user_profile()
 
-            params = {"id": self.id}
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    "https://api.twitch.tv/helix/users", headers=header, params=params
-                ) as r:
-                    user_profile_data = await r.json(encoding="utf-8")
-            if user_profile_data:
-                profile_image_url = user_profile_data["data"][0]["profile_image_url"]
-                data["profile_image_url"] = profile_image_url
-                data["view_count"] = user_profile_data["data"][0]["view_count"]
-                data["login"] = user_profile_data["data"][0]["login"]
+            final_data = dict.fromkeys(
+                ("game_name", "followers", "login", "profile_image_url", "view_count")
+            )
 
-            is_rerun = False
-            return self.make_embed(data), is_rerun
-        elif r.status == 400:
+            if user_profile_data is not None:
+                final_data["login"] = user_profile_data["login"]
+                final_data["profile_image_url"] = user_profile_data["profile_image_url"]
+                final_data["view_count"] = user_profile_data["view_count"]
+
+            stream_data = stream_data["data"][0]
+            final_data["user_name"] = self.display_name = stream_data["user_name"]
+            final_data["game_name"] = stream_data["game_name"]
+            final_data["thumbnail_url"] = stream_data["thumbnail_url"]
+            final_data["title"] = stream_data["title"]
+            final_data["type"] = stream_data["type"]
+
+            __, follows_data = await self.get_data(TWITCH_FOLLOWS_ENDPOINT, {"to_id": self.id})
+            if follows_data:
+                final_data["followers"] = follows_data["total"]
+
+            # Reset the retry count since we successfully got information about this
+            # channel's streams
+            self.retry_count = 0
+
+            return self.make_embed(final_data), final_data["type"] == "rerun"
+        elif stream_code == 400:
             raise InvalidTwitchCredentials()
-        elif r.status == 404:
+        elif stream_code == 404:
             raise StreamNotFound()
         else:
-            raise APIError(data)
+            raise APIError(stream_code, stream_data)
 
-    async def fetch_id(self):
-        header = {"Client-ID": str(self._client_id)}
-        if self._bearer is not None:
-            header = {**header, "Authorization": f"Bearer {self._bearer}"}
-        url = TWITCH_ID_ENDPOINT
-        params = {"login": self.name}
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=header, params=params) as r:
-                data = await r.json()
-
-        if r.status == 200:
+    async def _fetch_user_profile(self):
+        code, data = await self.get_data(TWITCH_ID_ENDPOINT, {"login": self.name})
+        if code == 200:
             if not data["data"]:
                 raise StreamNotFound()
-            return data["data"][0]["id"]
-        elif r.status == 400:
+            if self.id is None:
+                self.id = data["data"][0]["id"]
+            return data["data"][0]
+        elif code == 400:
             raise StreamNotFound()
-        elif r.status == 401:
+        elif code == 401:
             raise InvalidTwitchCredentials()
         else:
-            raise APIError(data)
+            raise APIError(code, data)
 
     def make_embed(self, data):
         is_rerun = data["type"] == "rerun"
@@ -436,55 +468,22 @@ class TwitchStream(Stream):
         return "<{0.__class__.__name__}: {0.name} (ID: {0.id})>".format(self)
 
 
-class HitboxStream(Stream):
-    token_name = None  # This streaming services don't currently require an API key
-
-    async def is_online(self):
-        url = "https://api.smashcast.tv/media/live/" + self.name
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as r:
-                # data = await r.json(encoding='utf-8')
-                data = await r.text()
-        data = json.loads(data, strict=False)
-        if "livestream" not in data:
-            raise StreamNotFound()
-        elif data["livestream"][0]["media_is_live"] == "0":
-            # self.already_online = False
-            raise OfflineStream()
-        elif data["livestream"][0]["media_is_live"] == "1":
-            # self.already_online = True
-            return self.make_embed(data)
-
-        raise APIError(data)
-
-    def make_embed(self, data):
-        base_url = "https://edge.sf.hitbox.tv"
-        livestream = data["livestream"][0]
-        channel = livestream["channel"]
-        url = channel["channel_link"]
-        embed = discord.Embed(title=livestream["media_status"], url=url, color=0x98CB00)
-        embed.set_author(name=livestream["media_name"])
-        embed.add_field(name=_("Followers"), value=humanize_number(channel["followers"]))
-        embed.set_thumbnail(url=base_url + channel["user_logo"])
-        if livestream["media_thumbnail"]:
-            embed.set_image(url=rnd(base_url + livestream["media_thumbnail"]))
-        embed.set_footer(text=_("Playing: ") + livestream["category_name"])
-
-        return embed
-
-
 class PicartoStream(Stream):
+
     token_name = None  # This streaming services don't currently require an API key
+    platform_name = "Picarto"
 
     async def is_online(self):
-        url = "https://api.picarto.tv/v1/channel/name/" + self.name
+        url = "https://api.picarto.tv/api/v1/channel/name/" + self.name
 
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as r:
                 data = await r.text(encoding="utf-8")
         if r.status == 200:
             data = json.loads(data)
+            # Reset the retry count since we successfully got information about this
+            # channel's streams
+            self.retry_count = 0
             if data["online"] is True:
                 # self.already_online = True
                 return self.make_embed(data)
@@ -494,7 +493,7 @@ class PicartoStream(Stream):
         elif r.status == 404:
             raise StreamNotFound()
         else:
-            raise APIError(data)
+            raise APIError(r.status, data)
 
     def make_embed(self, data):
         avatar = rnd(
@@ -540,25 +539,16 @@ class TrovoStream(Stream):
                 TROVO_CHANNELINFO_ENDPOINT, json={"channel_id": self.id}
             ) as response:
                 data = await response.json()
-        if response.status == 404:
-            raise StreamNotFound()
-        elif response.status == 400:
-            if data["message"] == "header err":
-                raise InvalidTrovoCredentials()
-            elif data["message"] == "check invalid param":
-                raise OfflineStream()
-                # raise StreamNotFound()
-            else:
-                raise APIError()
-        elif response.status != 200:
-            raise APIError()
-        if not data["is_live"]:
-            raise OfflineStream()
+        self._check_errors(response, data)
         return self.make_embed(data)
 
-    async def fetch_id(self, session):
+    async def fetch_id(self, session: aiohttp.ClientSession):
         async with session.post(TROVO_GETUSERS_ENDPOINT, json={"users": [self.name]}) as response:
             data = await response.json()
+        self._check_errors(response, data)
+        return data["users"][0]["channel_id"]
+
+    def _check_errors(self, response: aiohttp.ClientResponse, data: dict):
         if response.status == 404:
             raise StreamNotFound()
         elif response.status == 400:
@@ -567,10 +557,9 @@ class TrovoStream(Stream):
             elif data["message"] == "check invalid param":
                 raise StreamNotFound()
             else:
-                raise APIError()
+                raise APIError(400, data)
         elif response.status != 200:
-            raise APIError()
-        return data["users"][0]["channel_id"]
+            raise APIError(response.status, data)
 
     def make_embed(self, data: dict):
         embed = discord.Embed(
