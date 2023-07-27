@@ -22,7 +22,7 @@ To install:
 
 
 ## Credits
-
+[Obi-Wan3](https://github.com/Obi-Wan3/OB13-Cogs/tree/main/botaccess)
 [Zephyrkul](https://github.com/Zephyrkul)
 
 [Twentysix26](https://github.com/Twentysix26) - Developer of Red and initial creator of [the Rift cog](https://github.com/Twentysix26/26-Cogs/blob/master/rift/)
