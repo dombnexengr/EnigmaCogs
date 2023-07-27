@@ -10,11 +10,11 @@
 
 To install:
 
-> [p]repo add EnigmaCogs <https://github.com/dombnexengr/EnigmaCogs>
-> [p]cog list EnigmaCogs
-> [p]cog install EnigmaCogs &lt;cog&gt;
-> [p]load &lt;cog&gt;
-> [p]help &lt;Cog&gt;
+> [p]repo add EnigmaCogsDev https://github.com/dombnexengr/EnigmaCogs develop
+> [p]cog list EnigmaCogsDev
+> [p]cog install EnigmaCogsDev <cogs...>
+> [p]load <cog_name>
+> [p]help <cog_name>
 
 
 ## Credits
