@@ -356,7 +356,7 @@ class InfoChannel(Cog):
                 category_id = None
         if category_id is None:
             category: discord.CategoryChannel = await guild.create_category(
-                "Server Stats", reason="InfoChannel Category make"
+                "📊┋ Server Stats ┋📊", reason="InfoChannel Category make"
             )
             await self.config.guild(guild).category_id.set(category.id)
             await category.edit(position=0)
