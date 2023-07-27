@@ -1,23 +1,19 @@
-import asyncio
-import contextlib
-import logging
-import re
-from collections import defaultdict
-from datetime import datetime
-from typing import Dict, List, Optional, Tuple
-
-import aiohttp
 import discord
-from redbot.core import Config, checks, commands
+from redbot.core.utils.chat_formatting import humanize_list
 from redbot.core.bot import Red
-from redbot.core.i18n import Translator, cog_i18n, set_contextual_locales_from_guild
+from redbot.core import commands, Config
+from redbot.core.i18n import cog_i18n, Translator, set_contextual_locales_from_guild
 from redbot.core.utils._internal_utils import send_to_owners_with_prefix_replaced
-from redbot.core.utils.chat_formatting import escape, pagify
+from redbot.core.utils.chat_formatting import escape, inline, pagify
 
-from . import streamtypes as _streamtypes
+from .streamtypes import (
+    PicartoStream,
+    Stream,
+    TwitchStream,
+    YoutubeStream,
+)
 from .errors import (
     APIError,
-    InvalidTrovoCredentials,
     InvalidTwitchCredentials,
     InvalidYoutubeCredentials,
     OfflineStream,
@@ -25,14 +21,16 @@ from .errors import (
     StreamsError,
     YoutubeQuotaExceeded,
 )
-from .streamtypes import (
-    HitboxStream,
-    PicartoStream,
-    Stream,
-    TrovoStream,
-    TwitchStream,
-    YoutubeStream,
-)
+from . import streamtypes as _streamtypes
+
+import re
+import logging
+import asyncio
+import aiohttp
+import contextlib
+from datetime import datetime
+from collections import defaultdict
+from typing import Optional, List, Tuple, Union, Dict
 
 _ = Translator("Streams", __file__)
 log = logging.getLogger("red.fluffy.streams.Streams")
