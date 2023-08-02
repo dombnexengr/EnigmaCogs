@@ -538,9 +538,7 @@ class TrovoStream(Stream):
         async with aiohttp.ClientSession(headers={"Accept": "application/json", "Client-ID": self._client_id}) as session:
             if not self.id:
                 self.id = await self.fetch_id(session)
-            async with session.post(
-                TROVO_CHANNELINFO_ENDPOINT, json={"channel_id": self.id}
-            ) as response:
+            async with session.post(TROVO_CHANNELINFO_ENDPOINT, json={"channel_id": self.id}) as response:
                 data = await response.json()
         self._check_errors(response, data)
         return self.make_embed(data)
@@ -548,6 +546,7 @@ class TrovoStream(Stream):
     async def fetch_id(self, session: aiohttp.ClientSession):
         async with session.post(TROVO_GETUSERS_ENDPOINT, json={"users": [self.name]}) as response:
             data = await response.json()
+            print(data["users"][0]["channel_id"])
         self._check_errors(response, data)
         return data["users"][0]["channel_id"]
 
