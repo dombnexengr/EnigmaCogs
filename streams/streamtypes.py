@@ -537,7 +537,7 @@ class TrovoStream(Stream):
             raise InvalidTrovoCredentials()
         async with aiohttp.ClientSession(headers={"Accept": "application/json", "Client-ID": self._client_id}) as session:
             if not self.id:
-                self.id = await str(self.fetch_id(session))
+                self.id = await self.fetch_id(session)
             async with session.post(
                 TROVO_CHANNELINFO_ENDPOINT, json={"channel_id": self.id}
             ) as response:
