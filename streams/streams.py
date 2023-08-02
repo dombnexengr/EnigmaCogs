@@ -247,8 +247,8 @@ class Streams(commands.Cog):
     async def trovo(self, ctx: commands.Context, channel_name: str):
         """Check if a Trovo channel is live."""
         token = await self.bot.get_shared_api_tokens("trovo")
-        print(f"Trove token: %s", token)
-        stream = TrovoStream(name=channel_name, token=token)
+        print(f"Trovo token: %s", token)
+        stream = TrovoStream(_bot=self.bot, name=channel_name, token=token)
         await self.check_online(ctx, stream)
 
     async def check_online(
