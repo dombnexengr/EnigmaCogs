@@ -544,23 +544,60 @@ class KickStream(Stream):
     token_name = None
     platform_name = "Kick"
 
+    # Kick's JSON API is behind strict Cloudflare protection; scraping the channel
+    # page HTML is served with a lighter CF tier and embeds the same data in
+    # __NEXT_DATA__ (Next.js SSR).
+    _HEADERS = {
+        **_BROWSER_HEADERS,
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+            "image/avif,image/webp,*/*;q=0.8"
+        ),
+        "Referer": "https://kick.com/",
+        "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Upgrade-Insecure-Requests": "1",
+    }
+
     async def is_online(self):
-        url = KICK_CHANNELS_ENDPOINT + self.name.lower()
-        async with aiohttp.ClientSession(headers=_BROWSER_HEADERS) as session:
-            async with session.get(url, allow_redirects=True) as r:
-                if r.status == 404:
+        url = f"https://kick.com/{self.name.lower()}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=self._HEADERS, allow_redirects=True) as r:
+                status = r.status
+                if status == 404:
                     raise StreamNotFound()
-                if r.status != 200:
-                    raise APIError(r.status, {})
-                data = await r.json()
-        if not data.get("livestream"):
+                if status != 200:
+                    log.debug("Kick page returned HTTP %d for channel %s", status, self.name)
+                    raise APIError(status, {})
+                html = await r.text()
+
+        match = re.search(
+            r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+            html,
+            re.DOTALL,
+        )
+        if not match:
             raise OfflineStream()
+
+        try:
+            page_props = json.loads(match.group(1))["props"]["pageProps"]
+            channel_data = page_props["channel"]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            raise OfflineStream()
+
+        if not channel_data.get("livestream"):
+            raise OfflineStream()
+
         self.retry_count = 0
-        return self.make_embed(data)
+        return self.make_embed(channel_data)
 
     def make_embed(self, data: dict):
         livestream = data["livestream"]
-        user = data.get("user", {})
+        user = data.get("user") or {}
         slug = data.get("slug") or self.name
         channel_name = user.get("username") or slug
 
