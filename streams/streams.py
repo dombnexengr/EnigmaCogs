@@ -374,12 +374,13 @@ class Streams(commands.Cog):
         to_remove = []
 
         for stream in streams:
-            for channel_id in stream.channels:
-                if channel_id == ctx.channel.id:
-                    stream.channels.remove(channel_id)
-                elif _all and ctx.channel.id in local_channel_ids:
-                    if channel_id in stream.channels:
-                        stream.channels.remove(channel_id)
+            to_remove_channels = [
+                channel_id
+                for channel_id in stream.channels
+                if channel_id == ctx.channel.id or (_all and channel_id in local_channel_ids)
+            ]
+            for channel_id in to_remove_channels:
+                stream.channels.remove(channel_id)
 
             if not stream.channels:
                 to_remove.append(stream)

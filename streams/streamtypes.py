@@ -279,6 +279,7 @@ class YoutubeStream(Stream):
         async with aiohttp.ClientSession() as session:
             async with session.get(YOUTUBE_CHANNELS_ENDPOINT, params=params) as r:
                 data = await r.json()
+                status = r.status
 
         self._check_api_errors(data)
         if "items" in data and len(data["items"]) == 0:
@@ -291,7 +292,7 @@ class YoutubeStream(Stream):
             and data["pageInfo"]["totalResults"] < 1
         ):
             raise StreamNotFound()
-        raise APIError(r.status, data)
+        raise APIError(status, data)
 
     def _check_api_errors(self, data: dict):
         if "error" in data:
@@ -370,7 +371,7 @@ class TwitchStream(Stream):
                             "Ratelimited. Trying again at %s.", datetime.fromtimestamp(int(reset))
                         )
                         resp.release()
-                        return await self.get_data(url)
+                        return await self.get_data(url, params)
 
                     if resp.status != 200:
                         return resp.status, {}
@@ -523,10 +524,11 @@ class PicartoStream(Stream):
 
 class TrovoStream(Stream):
     token_name = "trovo"
+    platform_name = "Trovo"
 
     def __init__(self, **kwargs):
         self.id = kwargs.pop("id", None)
-        self._client_id = kwargs.pop("token").get("client_id")
+        self._client_id = kwargs.pop("token", {}).get("client_id")
         super().__init__(**kwargs)
 
     async def is_online(self):
@@ -539,13 +541,16 @@ class TrovoStream(Stream):
                 TROVO_CHANNELINFO_ENDPOINT, json={"channel_id": self.id}
             ) as response:
                 data = await response.json()
-        self._check_errors(response, data)
+                self._check_errors(response, data)
+        if not data.get("is_live", False):
+            raise OfflineStream()
+        self.retry_count = 0
         return self.make_embed(data)
 
     async def fetch_id(self, session: aiohttp.ClientSession):
         async with session.post(TROVO_GETUSERS_ENDPOINT, json={"users": [self.name]}) as response:
             data = await response.json()
-        self._check_errors(response, data)
+            self._check_errors(response, data)
         return data["users"][0]["channel_id"]
 
     def _check_errors(self, response: aiohttp.ClientResponse, data: dict):
