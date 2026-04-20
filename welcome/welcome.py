@@ -28,7 +28,7 @@ _EVENT_COLORS = {
 _EVENT_EMOJIS = {
     "join": "👋",
     "leave": "🚪",
-    "ban": "🔨",
+    "ban": "✈",
     "unban": "✅",
 }
 
@@ -489,14 +489,16 @@ class Welcome(commands.Cog):
         cfg = self.config.guild(guild)
         if not await cfg.enabled() or not await cfg.ban.enabled():
             return
-        await self._dispatch(guild, member, "ban")
+        moderator, reason = await self._fetch_audit(guild, member, discord.AuditLogAction.ban)
+        await self._dispatch(guild, member, "ban", moderator=moderator, reason=reason)
 
     @commands.Cog.listener()
     async def on_member_unban(self, guild: discord.Guild, user: discord.User) -> None:
         cfg = self.config.guild(guild)
         if not await cfg.enabled() or not await cfg.unban.enabled():
             return
-        await self._dispatch(guild, user, "unban")
+        moderator, reason = await self._fetch_audit(guild, user, discord.AuditLogAction.unban)
+        await self._dispatch(guild, user, "unban", moderator=moderator, reason=reason)
 
     # ─── Private: dispatch ───────────────────────────────────────────────────
 
@@ -508,6 +510,8 @@ class Welcome(commands.Cog):
         *,
         message_format: Optional[str] = None,
         use_image: Optional[bool] = None,
+        moderator: Optional[discord.Member] = None,
+        reason: Optional[str] = None,
     ) -> None:
         cfg = self.config.guild(guild)
         event_cfg = await cfg.get_attr(event).all()
@@ -552,7 +556,7 @@ class Welcome(commands.Cog):
 
         # Fallback (or non-join events) → rich embed
         if sent is None:
-            sent = await self._send_embed(channel, user, event, text)
+            sent = await self._send_embed(channel, user, event, text, moderator=moderator, reason=reason)
 
         if sent is not None:
             await cfg.get_attr(event).last.set(sent.id)
@@ -607,26 +611,48 @@ class Welcome(commands.Cog):
         user: Union[discord.Member, discord.User],
         event: str,
         text: str,
+        *,
+        moderator: Optional[discord.Member] = None,
+        reason: Optional[str] = None,
     ) -> Optional[discord.Message]:
         guild = channel.guild
+        emoji = _EVENT_EMOJIS.get(event, "")
         _event_desc = {
             "join": f"{user.mention} joined the server.",
             "leave": f"{user.mention} left.",
-            "ban": f"{user.mention} was banned.",
-            "unban": f"{user.mention} was unbanned.",
+            "ban": f"{emoji} {user.mention} banned from the server.",
+            "unban": f"{emoji} {user.mention} unbanned from the server.",
         }
+        av_url = str(user.display_avatar.replace(format="png", size=256))
+
         embed = discord.Embed(
             description=_event_desc.get(event, text),
             color=_EVENT_COLORS.get(event, 0x808080),
             timestamp=discord.utils.utcnow(),
         )
-        av_url = str(user.display_avatar.replace(format="png", size=256))
         embed.set_author(name=str(user), icon_url=av_url)
         embed.set_thumbnail(url=av_url)
-        embed.set_footer(
-            text=guild.name,
-            icon_url=guild.icon.url if guild.icon else None,
-        )
+
+        if event in ("ban", "unban") and moderator is not None:
+            embed.add_field(
+                name="Responsible Moderator:",
+                value=moderator.mention,
+                inline=False,
+            )
+            if reason:
+                embed.add_field(name="Reason:", value=reason, inline=False)
+            embed.set_footer(
+                text=str(moderator),
+                icon_url=str(moderator.display_avatar.replace(format="png", size=64)),
+            )
+        else:
+            if event in ("ban", "unban") and reason:
+                embed.add_field(name="Reason:", value=reason, inline=False)
+            embed.set_footer(
+                text=guild.name,
+                icon_url=guild.icon.url if guild.icon else None,
+            )
+
         try:
             return await channel.send(embed=embed)
         except discord.Forbidden:
@@ -669,6 +695,24 @@ class Welcome(commands.Cog):
             await channel.send(embed=embed)
         except (discord.Forbidden, discord.HTTPException) as exc:
             log.warning("Failed to send joinlog for guild %s: %s", guild.id, exc)
+
+    async def _fetch_audit(
+        self,
+        guild: discord.Guild,
+        target: Union[discord.Member, discord.User],
+        action: discord.AuditLogAction,
+    ) -> tuple:
+        """Fetch the moderator and reason from the audit log for a ban/unban action."""
+        await asyncio.sleep(0.5)
+        try:
+            async for entry in guild.audit_logs(limit=5, action=action):
+                if entry.target.id == target.id:
+                    return entry.user, entry.reason
+        except discord.Forbidden:
+            log.debug("Missing view_audit_log permission in guild %s", guild.id)
+        except discord.HTTPException as exc:
+            log.debug("Audit log fetch failed for guild %s: %s", guild.id, exc)
+        return None, None
 
     @staticmethod
     def _account_age(created_at: datetime) -> tuple:
