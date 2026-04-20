@@ -7,7 +7,8 @@ from redbot.core.utils._internal_utils import send_to_owners_with_prefix_replace
 from redbot.core.utils.chat_formatting import escape, inline, pagify
 
 from .streamtypes import (
-    PicartoStream,
+    KickStream,
+    TikTokStream,
     Stream,
     TwitchStream,
     YoutubeStream,
@@ -44,7 +45,7 @@ log = logging.getLogger("red.core.cogs.Streams")
 class Streams(commands.Cog):
     """Various commands relating to streaming platforms.
 
-    You can check if a Twitch, YouTube, Picarto, or Trovo stream is
+    You can check if a Twitch, YouTube, Trovo, Kick, or TikTok stream is
     currently live.
     """
 
@@ -238,9 +239,16 @@ class Streams(commands.Cog):
 
     @commands.guild_only()
     @commands.command()
-    async def picarto(self, ctx: commands.Context, channel_name: str):
-        """Check if a Picarto channel is live."""
-        stream = PicartoStream(_bot=self.bot, name=channel_name)
+    async def kickstream(self, ctx: commands.Context, channel_name: str):
+        """Check if a Kick channel is live."""
+        stream = KickStream(_bot=self.bot, name=channel_name)
+        await self.check_online(ctx, stream)
+
+    @commands.guild_only()
+    @commands.command()
+    async def tiktokstream(self, ctx: commands.Context, channel_name: str):
+        """Check if a TikTok account is live."""
+        stream = TikTokStream(_bot=self.bot, name=channel_name)
         await self.check_online(ctx, stream)
 
     @commands.command()
@@ -253,7 +261,7 @@ class Streams(commands.Cog):
     async def check_online(
         self,
         ctx: commands.Context,
-        stream: Union[PicartoStream, YoutubeStream, TwitchStream, TrovoStream],
+        stream: Union[KickStream, TikTokStream, YoutubeStream, TwitchStream, TrovoStream],
     ):
         try:
             info = await stream.is_online()
@@ -345,12 +353,19 @@ class Streams(commands.Cog):
         """Toggle alerts in this channel for a YouTube stream."""
         await self.stream_alert(ctx, YoutubeStream, channel_name_or_id, discord_channel)
 
-    @streamalert.command(name="picarto")
-    async def picarto_alert(
+    @streamalert.command(name="kick")
+    async def kick_alert(
         self, ctx: commands.Context, channel_name: str, discord_channel: discord.TextChannel = None
     ):
-        """Toggle alerts in this channel for a Picarto stream."""
-        await self.stream_alert(ctx, PicartoStream, channel_name, discord_channel)
+        """Toggle alerts in this channel for a Kick stream."""
+        await self.stream_alert(ctx, KickStream, channel_name.lower(), discord_channel)
+
+    @streamalert.command(name="tiktok")
+    async def tiktok_alert(
+        self, ctx: commands.Context, channel_name: str, discord_channel: discord.TextChannel = None
+    ):
+        """Toggle alerts in this channel for a TikTok live stream."""
+        await self.stream_alert(ctx, TikTokStream, channel_name, discord_channel)
 
     @streamalert.command(name="trovo")
     async def trovo_alert(

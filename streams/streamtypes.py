@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import time
 from dateutil.parser import parse as parse_time
 from random import choice
@@ -28,8 +29,6 @@ from redbot.core.utils.chat_formatting import humanize_number, humanize_timedelt
 TWITCH_BASE_URL = "https://api.twitch.tv"
 TWITCH_ID_ENDPOINT = TWITCH_BASE_URL + "/helix/users"
 TWITCH_STREAMS_ENDPOINT = TWITCH_BASE_URL + "/helix/streams/"
-TWITCH_FOLLOWS_ENDPOINT = TWITCH_ID_ENDPOINT + "/follows"
-
 YOUTUBE_BASE_URL = "https://www.googleapis.com/youtube/v3"
 YOUTUBE_CHANNELS_ENDPOINT = YOUTUBE_BASE_URL + "/channels"
 YOUTUBE_SEARCH_ENDPOINT = YOUTUBE_BASE_URL + "/search"
@@ -39,6 +38,11 @@ YOUTUBE_CHANNEL_RSS = "https://www.youtube.com/feeds/videos.xml?channel_id={chan
 TROVO_BASE_URL = "https://open-api.trovo.live/openplatform"
 TROVO_GETUSERS_ENDPOINT = TROVO_BASE_URL + "/getusers"
 TROVO_CHANNELINFO_ENDPOINT = TROVO_BASE_URL + "/channels/id"
+
+KICK_BASE_URL = "https://kick.com/api/v2"
+KICK_CHANNELS_ENDPOINT = KICK_BASE_URL + "/channels/"
+
+TIKTOK_LIVE_URL = "https://www.tiktok.com/@{username}/live"
 
 _ = Translator("Streams", __file__)
 
@@ -465,59 +469,6 @@ class TwitchStream(Stream):
         return "<{0.__class__.__name__}: {0.name} (ID: {0.id})>".format(self)
 
 
-class PicartoStream(Stream):
-
-    token_name = None  # This streaming services don't currently require an API key
-    platform_name = "Picarto"
-
-    async def is_online(self):
-        url = "https://api.picarto.tv/api/v1/channel/name/" + self.name
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as r:
-                data = await r.text(encoding="utf-8")
-        if r.status == 200:
-            data = json.loads(data)
-            # Reset the retry count since we successfully got information about this
-            # channel's streams
-            self.retry_count = 0
-            if data["online"] is True:
-                # self.already_online = True
-                return self.make_embed(data)
-            else:
-                # self.already_online = False
-                raise OfflineStream()
-        elif r.status == 404:
-            raise StreamNotFound()
-        else:
-            raise APIError(r.status, data)
-
-    def make_embed(self, data):
-        avatar = rnd(
-            "https://picarto.tv/user_data/usrimg/{}/dsdefault.jpg".format(data["name"].lower())
-        )
-        url = "https://picarto.tv/" + data["name"]
-        thumbnail = data["thumbnails"]["web"]
-        embed = discord.Embed(title=data["title"], url=url, color=0x4C90F3)
-        embed.set_author(name=data["name"])
-        embed.set_image(url=rnd(thumbnail))
-        embed.add_field(name=_("Followers"), value=humanize_number(data["followers"]))
-        embed.add_field(name=_("Total views"), value=humanize_number(data["viewers_total"]))
-        embed.set_thumbnail(url=avatar)
-        data["tags"] = ", ".join(data["tags"])
-
-        if not data["tags"]:
-            data["tags"] = _("None")
-
-        if data["adult"]:
-            data["adult"] = _("NSFW | ")
-        else:
-            data["adult"] = ""
-
-        embed.set_footer(text=_("{adult}Category: {category} | Tags: {tags}").format(**data))
-        return embed
-
-
 class TrovoStream(Stream):
     token_name = "trovo"
     platform_name = "Trovo"
@@ -576,4 +527,138 @@ class TrovoStream(Stream):
             embed.set_image(url=rnd(thumbnail))
         if category := data["category_name"]:
             embed.set_footer(text=_("Playing: ") + category)
+        return embed
+
+
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/html, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
+class KickStream(Stream):
+    token_name = None
+    platform_name = "Kick"
+
+    async def is_online(self):
+        url = KICK_CHANNELS_ENDPOINT + self.name.lower()
+        async with aiohttp.ClientSession(headers=_BROWSER_HEADERS) as session:
+            async with session.get(url, allow_redirects=True) as r:
+                if r.status == 404:
+                    raise StreamNotFound()
+                if r.status != 200:
+                    raise APIError(r.status, {})
+                data = await r.json()
+        if not data.get("livestream"):
+            raise OfflineStream()
+        self.retry_count = 0
+        return self.make_embed(data)
+
+    def make_embed(self, data: dict):
+        livestream = data["livestream"]
+        user = data.get("user", {})
+        slug = data.get("slug") or self.name
+        channel_name = user.get("username") or slug
+
+        title = livestream.get("session_title") or _("Untitled broadcast")
+        url = f"https://kick.com/{slug}"
+        embed = discord.Embed(title=title, url=url, color=0x53FC18)
+        embed.set_author(name=channel_name)
+
+        viewer_count = livestream.get("viewer_count")
+        if viewer_count is not None:
+            embed.add_field(name=_("Viewers"), value=humanize_number(viewer_count))
+
+        followers = data.get("followers_count")
+        if followers is not None:
+            embed.add_field(name=_("Followers"), value=humanize_number(followers))
+
+        if profile_pic := user.get("profile_pic"):
+            embed.set_thumbnail(url=profile_pic)
+
+        thumbnail_url = (livestream.get("thumbnail") or {}).get("url")
+        if thumbnail_url:
+            embed.set_image(url=rnd(thumbnail_url))
+
+        categories = livestream.get("categories") or []
+        if categories:
+            embed.set_footer(text=_("Playing: ") + categories[0].get("name", ""))
+
+        return embed
+
+
+class TikTokStream(Stream):
+    token_name = None
+    platform_name = "TikTok"
+
+    async def is_online(self):
+        url = TIKTOK_LIVE_URL.format(username=self.name)
+        headers = {**_BROWSER_HEADERS, "Referer": "https://www.tiktok.com/"}
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(url, allow_redirects=True) as r:
+                if r.status == 404:
+                    raise StreamNotFound()
+                if r.status != 200:
+                    raise APIError(r.status, {})
+                final_url = str(r.url)
+                html = await r.text()
+
+        # If TikTok redirected away from the /live path the user is offline
+        if "/live" not in final_url:
+            raise OfflineStream()
+
+        match = re.search(
+            r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+            html,
+            re.DOTALL,
+        )
+        if not match:
+            raise OfflineStream()
+
+        try:
+            page_props = json.loads(match.group(1))["props"]["pageProps"]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            raise OfflineStream()
+
+        room_info = page_props.get("roomInfo") or {}
+        # status 2 = currently live
+        if room_info.get("status") != 2:
+            raise OfflineStream()
+
+        self.retry_count = 0
+        return self.make_embed(room_info, page_props.get("userInfo") or {})
+
+    def make_embed(self, room_info: dict, user_info: dict):
+        user = user_info.get("user") or {}
+        stats = user_info.get("stats") or {}
+
+        username = user.get("uniqueId") or self.name
+        display_name = user.get("nickname") or username
+        avatar = user.get("avatarThumb") or user.get("avatarMedium")
+
+        title = room_info.get("title") or _("Untitled broadcast")
+        url = f"https://www.tiktok.com/@{username}/live"
+        embed = discord.Embed(title=title, url=url, color=0xFE2C55)
+        embed.set_author(name=display_name)
+
+        viewer_count = room_info.get("user_count")
+        if viewer_count is not None:
+            embed.add_field(name=_("Viewers"), value=humanize_number(viewer_count))
+
+        follower_count = stats.get("followerCount")
+        if follower_count is not None:
+            embed.add_field(name=_("Followers"), value=humanize_number(follower_count))
+
+        if avatar:
+            embed.set_thumbnail(url=avatar)
+
+        cover = room_info.get("cover") or {}
+        cover_urls = cover.get("url_list") or []
+        if cover_urls:
+            embed.set_image(url=rnd(cover_urls[0]))
+
         return embed
