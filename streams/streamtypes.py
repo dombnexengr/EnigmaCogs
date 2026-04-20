@@ -397,7 +397,7 @@ class TwitchStream(Stream):
                 user_profile_data = await self._fetch_user_profile()
 
             final_data = dict.fromkeys(
-                ("game_name", "followers", "login", "profile_image_url", "view_count")
+                ("game_name", "login", "profile_image_url", "view_count")
             )
 
             if user_profile_data is not None:
@@ -411,10 +411,6 @@ class TwitchStream(Stream):
             final_data["thumbnail_url"] = stream_data["thumbnail_url"]
             final_data["title"] = stream_data["title"]
             final_data["type"] = stream_data["type"]
-
-            __, follows_data = await self.get_data(TWITCH_FOLLOWS_ENDPOINT, {"to_id": self.id})
-            if follows_data:
-                final_data["followers"] = follows_data["total"]
 
             # Reset the retry count since we successfully got information about this
             # channel's streams
@@ -456,8 +452,8 @@ class TwitchStream(Stream):
             status += _(" - Rerun")
         embed = discord.Embed(title=status, url=url, color=0x6441A4)
         embed.set_author(name=data["user_name"])
-        embed.add_field(name=_("Followers"), value=humanize_number(data["followers"]))
-        embed.add_field(name=_("Total views"), value=humanize_number(data["view_count"]))
+        if data.get("view_count") is not None:
+            embed.add_field(name=_("Total views"), value=humanize_number(data["view_count"]))
         embed.set_thumbnail(url=logo)
         if data["thumbnail_url"]:
             embed.set_image(url=rnd(data["thumbnail_url"].format(width=320, height=180)))
