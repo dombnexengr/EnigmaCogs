@@ -209,6 +209,7 @@ class YoutubeStream(Stream):
         # This is technically redundant since we have the
         # info from the RSS ... but incase you don't wanna deal with fully rewritting the
         # code for this part, as this is only a 2 quota query.
+        log.debug("YouTube %s: livestreams=%s", self.name, self.livestreams)
         if self.livestreams:
             params = {
                 "key": self._token["api_key"],
@@ -218,6 +219,15 @@ class YoutubeStream(Stream):
             async with aiohttp.ClientSession() as session:
                 async with session.get(YOUTUBE_VIDEOS_ENDPOINT, params=params) as r:
                     data = await r.json()
+            try:
+                self._check_api_errors(data)
+            except (YoutubeQuotaExceeded, InvalidYoutubeCredentials, APIError) as exc:
+                log.debug("YouTube %s: final details fetch failed: %s", self.name, exc)
+                raise OfflineStream()
+            if not data.get("items"):
+                log.debug("YouTube %s: details fetch returned no items", self.name)
+                self.livestreams.pop()
+                raise OfflineStream()
             return await self.make_embed(data)
         raise OfflineStream()
 
@@ -640,34 +650,88 @@ class TikTokStream(Stream):
                 if r.status == 404:
                     raise StreamNotFound()
                 if r.status != 200:
+                    log.debug("TikTok %s: HTTP %d", self.name, r.status)
                     raise APIError(r.status, {})
                 final_url = str(r.url)
                 html = await r.text()
 
-        # If TikTok redirected away from the /live path the user is offline
+        log.debug("TikTok %s: final URL = %s", self.name, final_url)
+
+        # HTTP redirect away from /live means offline
         if "/live" not in final_url:
             raise OfflineStream()
 
-        match = re.search(
-            r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
-            html,
-            re.DOTALL,
-        )
-        if not match:
-            raise OfflineStream()
+        room_info, user_info = self._extract_live_data(html)
+        status = room_info.get("status")
+        log.debug("TikTok %s: room status = %r (type %s)", self.name, status, type(status).__name__)
 
-        try:
-            page_props = json.loads(match.group(1))["props"]["pageProps"]
-        except (json.JSONDecodeError, KeyError, TypeError):
-            raise OfflineStream()
-
-        room_info = page_props.get("roomInfo") or {}
-        # status 2 = currently live
-        if room_info.get("status") != 2:
+        # status 2 (int or str) = currently live
+        if status not in (2, "2"):
             raise OfflineStream()
 
         self.retry_count = 0
-        return self.make_embed(room_info, page_props.get("userInfo") or {})
+        return self.make_embed(room_info, user_info)
+
+    def _extract_live_data(self, html: str):
+        """Try every known TikTok JSON data embedding pattern."""
+
+        # Pattern 1: Next.js __NEXT_DATA__ (older TikTok layout)
+        m = re.search(
+            r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+            html, re.DOTALL,
+        )
+        if m:
+            try:
+                nd = json.loads(m.group(1))
+                pp = nd["props"]["pageProps"]
+                # TikTok has changed the key name several times
+                room_info = (
+                    pp.get("roomInfo")
+                    or pp.get("liveRoom")
+                    or (pp.get("roomInfoRes") or {}).get("data")
+                    or (pp.get("data") or {}).get("liveRoom")
+                    or {}
+                )
+                if room_info:
+                    log.debug("TikTok: found room_info via __NEXT_DATA__")
+                    return room_info, pp.get("userInfo") or {}
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                log.debug("TikTok: __NEXT_DATA__ parse error: %s", exc)
+
+        # Pattern 2: SIGI_STATE (newer TikTok layout)
+        m = re.search(r'<script id="SIGI_STATE"[^>]*>(.*?)</script>', html, re.DOTALL)
+        if m:
+            try:
+                sigi = json.loads(m.group(1))
+                lr_info = sigi.get("LiveRoom", {}).get("liveRoomUserInfo", {})
+                room_info = lr_info.get("liveRoom") or {}
+                if room_info:
+                    log.debug("TikTok: found room_info via SIGI_STATE")
+                    user_info = {"user": lr_info.get("user") or {}}
+                    return room_info, user_info
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                log.debug("TikTok: SIGI_STATE parse error: %s", exc)
+
+        # Pattern 3: __UNIVERSAL_DATA_FOR_REHYDRATION__ (newest TikTok layout)
+        m = re.search(
+            r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>',
+            html, re.DOTALL,
+        )
+        if m:
+            try:
+                uni = json.loads(m.group(1))
+                scope = uni.get("__DEFAULT_SCOPE__", {})
+                live_detail = scope.get("webapp.live-detail", {})
+                room_info = live_detail.get("liveRoom") or {}
+                if room_info:
+                    log.debug("TikTok: found room_info via __UNIVERSAL_DATA_FOR_REHYDRATION__")
+                    user_info = live_detail.get("userInfo") or {}
+                    return room_info, user_info
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                log.debug("TikTok: __UNIVERSAL_DATA_FOR_REHYDRATION__ parse error: %s", exc)
+
+        log.debug("TikTok: no live data found in any known pattern")
+        return {}, {}
 
     def make_embed(self, room_info: dict, user_info: dict):
         user = user_info.get("user") or {}
@@ -682,7 +746,7 @@ class TikTokStream(Stream):
         embed = discord.Embed(title=title, url=url, color=0xFE2C55)
         embed.set_author(name=display_name)
 
-        viewer_count = room_info.get("user_count")
+        viewer_count = room_info.get("user_count") or room_info.get("userCount")
         if viewer_count is not None:
             embed.add_field(name=_("Viewers"), value=humanize_number(viewer_count))
 
