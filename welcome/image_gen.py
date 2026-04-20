@@ -18,12 +18,21 @@ except ImportError:
     log.info("Pillow not installed — welcome image cards disabled. Run: pip install Pillow")
 
 
+_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
+
+
 async def _fetch(url: str) -> Optional[bytes]:
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with aiohttp.ClientSession(headers=_HEADERS) as session:
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=15), allow_redirects=True
+            ) as resp:
                 if resp.status == 200:
                     return await resp.read()
+                log.debug("Fetch %s returned status %s", url, resp.status)
     except Exception as exc:
         log.debug("Failed to fetch %s: %s", url, exc)
     return None
