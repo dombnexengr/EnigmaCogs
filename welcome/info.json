@@ -1,0 +1,22 @@
+{
+    "$schema": "https://raw.githubusercontent.com/Cog-Creators/Red-DiscordBot/V3/develop/schema/red_cog.schema.json",
+    "author": [
+        "EnigmaCom"
+    ],
+    "description": "ProBot-style welcome notices with image cards, rich embeds, and full event coverage (join, leave, ban, unban). Fully configurable per event with per-guild channels, message pools, DM whispers, and custom accent colors.",
+    "end_user_data_statement": "This cog does not persistently store data or metadata about users.",
+    "install_msg": "Thanks for installing! Enable with `[p]welcome toggle` and set a channel with `[p]welcome channel #channel`. Run `[p]help welcome` for the full command list.",
+    "min_bot_version": "3.5.0",
+    "min_python_version": [3, 8, 0],
+    "name": "Welcome",
+    "requirements": ["Pillow"],
+    "short": "ProBot-style welcome image cards and event notices for join, leave, ban, and unban.",
+    "tags": [
+        "welcome",
+        "join",
+        "leave",
+        "ban",
+        "utility",
+        "image"
+    ]
+}
