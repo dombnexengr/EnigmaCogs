@@ -14,6 +14,12 @@ from typing import ClassVar, Optional, List, Tuple
 import aiohttp
 import discord
 
+try:
+    from curl_cffi.requests import AsyncSession as _CurlSession
+    _CURL_AVAILABLE = True
+except ImportError:
+    _CURL_AVAILABLE = False
+
 from .errors import (
     APIError,
     OfflineStream,
@@ -286,7 +292,10 @@ class YoutubeStream(Stream):
     async def _fetch_channel_resource(self, resource: str):
         params = {"key": self._token["api_key"], "part": resource}
         if resource == "id":
-            params["forUsername"] = self.name
+            if self.name.startswith("@"):
+                params["forHandle"] = self.name
+            else:
+                params["forUsername"] = self.name
         else:
             params["id"] = self.id
 
@@ -296,6 +305,18 @@ class YoutubeStream(Stream):
                 status = r.status
 
         self._check_api_errors(data)
+
+        # forUsername returns nothing for modern @handle channels — retry with forHandle
+        if resource == "id" and "forUsername" in params and not data.get("items"):
+            log.debug("YouTube %s: forUsername returned no results, retrying with forHandle", self.name)
+            params.pop("forUsername")
+            params["forHandle"] = f"@{self.name}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(YOUTUBE_CHANNELS_ENDPOINT, params=params) as r:
+                    data = await r.json()
+                    status = r.status
+            self._check_api_errors(data)
+
         if "items" in data and len(data["items"]) == 0:
             raise StreamNotFound()
         elif "items" in data:
@@ -575,15 +596,23 @@ class KickStream(Stream):
 
     async def is_online(self):
         url = f"https://kick.com/{self.name.lower()}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=self._HEADERS, allow_redirects=True) as r:
-                status = r.status
-                if status == 404:
-                    raise StreamNotFound()
-                if status != 200:
-                    log.debug("Kick page returned HTTP %d for channel %s", status, self.name)
-                    raise APIError(status, {})
-                html = await r.text()
+        if _CURL_AVAILABLE:
+            # curl_cffi impersonates Chrome's TLS fingerprint, bypassing Cloudflare
+            async with _CurlSession(impersonate="chrome120") as session:
+                r = await session.get(url, allow_redirects=True)
+                status = r.status_code
+                html = r.text
+        else:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=self._HEADERS, allow_redirects=True) as r:
+                    status = r.status
+                    html = await r.text()
+
+        if status == 404:
+            raise StreamNotFound()
+        if status != 200:
+            log.debug("Kick %s: HTTP %d", self.name, status)
+            raise APIError(status, {})
 
         match = re.search(
             r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
