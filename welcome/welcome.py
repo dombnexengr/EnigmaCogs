@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Literal, Optional, Union
 
@@ -82,6 +83,10 @@ class Welcome(commands.Cog):
             "delete": False,
             "last": None,
             "messages": ["**{member.name}** has been unbanned from **{server.name}**."],
+        },
+        "joinlog": {
+            "enabled": False,
+            "channel": None,
         },
     }
 
@@ -402,6 +407,34 @@ class Welcome(commands.Cog):
         """List all unban message formats."""
         await self._list_messages(ctx, "unban")
 
+    # ─── Join Log ────────────────────────────────────────────────────────────
+
+    @welcome.group(name="joinlog")
+    async def welcome_joinlog(self, ctx: commands.Context) -> None:
+        """Settings for the join log — a compact embed showing account age sent to a staff channel."""
+
+    @welcome_joinlog.command(name="toggle")
+    async def wjl_toggle(self, ctx: commands.Context, on_off: Optional[bool] = None) -> None:
+        """Toggle the join log on or off."""
+        current = await self.config.guild(ctx.guild).joinlog.enabled()
+        state = on_off if on_off is not None else not current
+        await self.config.guild(ctx.guild).joinlog.enabled.set(state)
+        await ctx.send(f"Join log is now **{_ON if state else _OFF}**.")
+
+    @welcome_joinlog.command(name="channel")
+    async def wjl_channel(
+        self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None
+    ) -> None:
+        """Set the channel for join log posts. Leave blank to clear."""
+        if channel is not None and not self._can_speak_in(channel):
+            await ctx.send(f"I don't have permission to send messages in {channel.mention}.")
+            return
+        await self.config.guild(ctx.guild).joinlog.channel.set(channel.id if channel else None)
+        if channel:
+            await ctx.send(f"Join log will be posted to {channel.mention}.")
+        else:
+            await ctx.send("Join log channel cleared.")
+
     # ─── Event Listeners ─────────────────────────────────────────────────────
 
     @commands.Cog.listener()
@@ -423,26 +456,24 @@ class Welcome(commands.Cog):
 
         if whisper_state == "off":
             await self._dispatch(guild, member, "join")
-            return
-
-        dm_ok = await self._send_dm(member)
-
-        if whisper_state == "only":
-            return
-        elif whisper_state == "fall":
-            if dm_ok:
-                return
-            # DM failed — send the whisper message as a plain channel notice (no image)
-            await self._dispatch(
-                guild,
-                member,
-                "join",
-                message_format=join_cfg["whisper"]["message"],
-                use_image=False,
-            )
         else:
-            # "both" — DM sent, still send channel notice
-            await self._dispatch(guild, member, "join")
+            dm_ok = await self._send_dm(member)
+            if whisper_state == "only":
+                pass
+            elif whisper_state == "fall":
+                if not dm_ok:
+                    await self._dispatch(
+                        guild,
+                        member,
+                        "join",
+                        message_format=join_cfg["whisper"]["message"],
+                        use_image=False,
+                    )
+            else:
+                # "both" — DM sent, still send channel notice
+                await self._dispatch(guild, member, "join")
+
+        await self._send_joinlog(member)
 
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member) -> None:
@@ -577,13 +608,25 @@ class Welcome(commands.Cog):
         event: str,
         text: str,
     ) -> Optional[discord.Message]:
-        emoji = _EVENT_EMOJIS.get(event, "")
+        guild = channel.guild
+        _event_desc = {
+            "join": f"{user.mention} joined the server.",
+            "leave": f"{user.mention} left.",
+            "ban": f"{user.mention} was banned.",
+            "unban": f"{user.mention} was unbanned.",
+        }
         embed = discord.Embed(
-            description=f"{emoji} {text}",
+            description=_event_desc.get(event, text),
             color=_EVENT_COLORS.get(event, 0x808080),
+            timestamp=discord.utils.utcnow(),
         )
-        embed.set_thumbnail(url=str(user.display_avatar.replace(format="png", size=128)))
-        embed.set_footer(text=f"{event.capitalize()} • {user}")
+        av_url = str(user.display_avatar.replace(format="png", size=256))
+        embed.set_author(name=str(user), icon_url=av_url)
+        embed.set_thumbnail(url=av_url)
+        embed.set_footer(
+            text=guild.name,
+            icon_url=guild.icon.url if guild.icon else None,
+        )
         try:
             return await channel.send(embed=embed)
         except discord.Forbidden:
@@ -591,6 +634,59 @@ class Welcome(commands.Cog):
         except discord.HTTPException as exc:
             log.warning("HTTP error sending embed: %s", exc)
         return None
+
+    async def _send_joinlog(self, member: discord.Member) -> None:
+        guild = member.guild
+        cfg = self.config.guild(guild)
+        if not await cfg.joinlog.enabled():
+            return
+
+        ch_id = await cfg.joinlog.channel()
+        channel = guild.get_channel(ch_id) if ch_id else None
+        if channel is None or not self._can_speak_in(channel):
+            return
+
+        date_str, age_str = self._account_age(member.created_at)
+        av_url = str(member.display_avatar.replace(format="png", size=256))
+
+        embed = discord.Embed(
+            description=f"{member.mention} joined the server.",
+            color=0x57F287,
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.set_author(name=str(member), icon_url=av_url)
+        embed.set_thumbnail(url=av_url)
+        embed.add_field(
+            name="\N{HEAVY CIRCLE} Age of account:",
+            value=f"{date_str}\n{age_str}",
+            inline=False,
+        )
+        embed.set_footer(
+            text=guild.name,
+            icon_url=guild.icon.url if guild.icon else None,
+        )
+        try:
+            await channel.send(embed=embed)
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            log.warning("Failed to send joinlog for guild %s: %s", guild.id, exc)
+
+    @staticmethod
+    def _account_age(created_at: datetime) -> tuple:
+        date_str = created_at.strftime("%d/%m/%Y %H:%M")
+        delta = datetime.now(timezone.utc) - created_at
+        days = delta.days
+        if days >= 365:
+            n = days // 365
+            age_str = f"{n} year{'s' if n != 1 else ''} ago"
+        elif days >= 30:
+            n = days // 30
+            age_str = f"{n} month{'s' if n != 1 else ''} ago"
+        elif days >= 1:
+            age_str = f"{days} day{'s' if days != 1 else ''} ago"
+        else:
+            n = delta.seconds // 3600
+            age_str = f"{n} hour{'s' if n != 1 else ''} ago" if n else "just now"
+        return date_str, age_str
 
     async def _send_dm(self, member: discord.Member) -> bool:
         fmt = await self.config.guild(member.guild).join.whisper.message()
@@ -742,6 +838,9 @@ class Welcome(commands.Cog):
         bch = await self._get_channel(guild, "ban")
         uch = await self._get_channel(guild, "unban")
 
+        jl = c["joinlog"]
+        jl_ch = guild.get_channel(jl["channel"]) if jl["channel"] else None
+
         j, v, b, u = c["join"], c["leave"], c["ban"], c["unban"]
         jw = j["whisper"]
         whisper_prev = jw["message"][:50] + ("…" if len(jw["message"]) > 50 else "")
@@ -805,6 +904,14 @@ class Welcome(commands.Cog):
                     f"do `{ctx.prefix}welcomeset unban msg list` for a list"
                 ),
             )
+            embed.add_field(
+                name="Join Log",
+                inline=False,
+                value=(
+                    f"**Enabled:** {jl['enabled']}\n"
+                    f"**Channel:** {jl_ch.mention if jl_ch else 'None'}"
+                ),
+            )
             await ctx.send(embed=embed)
         else:
             msg = (
@@ -814,6 +921,7 @@ class Welcome(commands.Cog):
                 f"  Leave: {v['enabled']}  {vch}  del={v['delete']}  msgs={len(v['messages'])}\n"
                 f"  Ban:   {b['enabled']}  {bch}  del={b['delete']}  msgs={len(b['messages'])}\n"
                 f"  Unban: {u['enabled']}  {uch}  del={u['delete']}  msgs={len(u['messages'])}\n"
+                f"  JoinLog: {jl['enabled']}  {jl_ch}\n"
             )
             await ctx.send(box(msg, "Current Welcome Settings"))
 
