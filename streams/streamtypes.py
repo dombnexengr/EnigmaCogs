@@ -159,62 +159,61 @@ class YoutubeStream(Stream):
         if self.livestreams:
             self.livestreams = list(dict.fromkeys(self.livestreams))
 
-        for video_id in get_video_ids_from_feed(rssdata):
-            if video_id in self.not_livestreams:
-                log.debug(f"video_id in not_livestreams: {video_id}")
-                continue
-            log.debug(f"video_id not in not_livestreams: {video_id}")
+        # Collect IDs not yet confirmed as non-livestreams
+        ids_to_check = [
+            vid for vid in get_video_ids_from_feed(rssdata)
+            if vid not in self.not_livestreams
+        ]
+        log.debug("YouTube %s: checking %d video IDs: %s", self.name, len(ids_to_check), ids_to_check)
+
+        if ids_to_check:
+            # Single batched API call — YouTube allows up to 50 comma-separated IDs
+            # and charges only 1 quota unit regardless of how many IDs are in the list.
             params = {
                 "key": self._token["api_key"],
-                "id": video_id,
+                "id": ",".join(ids_to_check),
                 "part": "id,liveStreamingDetails",
             }
             async with aiohttp.ClientSession() as session:
                 async with session.get(YOUTUBE_VIDEOS_ENDPOINT, params=params) as r:
                     data = await r.json()
-                    try:
-                        self._check_api_errors(data)
-                    except InvalidYoutubeCredentials:
-                        log.error("The YouTube API key is either invalid or has not been set.")
-                        break
-                    except YoutubeQuotaExceeded:
-                        log.error("YouTube quota has been exceeded.")
-                        break
-                    except APIError as e:
-                        log.error(
-                            "Something went wrong whilst trying to"
-                            " contact the stream service's API.\n"
-                            "Raw response data:\n%r",
-                            e,
-                        )
-                        continue
-                    video_data = data.get("items", [{}])[0]
-                    stream_data = video_data.get("liveStreamingDetails", {})
-                    log.debug(f"stream_data for {video_id}: {stream_data}")
-                    if (
-                        stream_data
-                        and stream_data != "None"
-                        and stream_data.get("actualEndTime", None) is None
-                    ):
-                        actual_start_time = stream_data.get("actualStartTime", None)
-                        scheduled = stream_data.get("scheduledStartTime", None)
-                        if scheduled is not None and actual_start_time is None:
-                            scheduled = parse_time(scheduled)
-                            if (scheduled - datetime.now(timezone.utc)).total_seconds() < -3600:
-                                continue
-                        elif actual_start_time is None:
+            try:
+                self._check_api_errors(data)
+            except (InvalidYoutubeCredentials, YoutubeQuotaExceeded):
+                # Propagate — handled in check_online (user-facing) and check_streams
+                # (outer exception handler preserves stream.messages)
+                raise
+            except APIError as e:
+                log.error("YouTube API error during batch check: %r", e)
+                ids_to_check = []  # skip update, try again next cycle
+
+            # Index returned items by video ID
+            items_by_id = {item["id"]: item for item in data.get("items", [])}
+
+            for video_id in ids_to_check:
+                video_data = items_by_id.get(video_id, {})
+                stream_data = video_data.get("liveStreamingDetails", {})
+                log.debug("YouTube %s: %s → %s", self.name, video_id, stream_data)
+                if (
+                    stream_data
+                    and stream_data != "None"
+                    and stream_data.get("actualEndTime", None) is None
+                ):
+                    actual_start_time = stream_data.get("actualStartTime", None)
+                    scheduled = stream_data.get("scheduledStartTime", None)
+                    if scheduled is not None and actual_start_time is None:
+                        scheduled = parse_time(scheduled)
+                        if (scheduled - datetime.now(timezone.utc)).total_seconds() < -3600:
                             continue
-                        if video_id not in self.livestreams:
-                            self.livestreams.append(video_id)
-                    else:
-                        self.not_livestreams.append(video_id)
-                        if video_id in self.livestreams:
-                            self.livestreams.remove(video_id)
-        log.debug(f"livestreams for {self.name}: {self.livestreams}")
-        log.debug(f"not_livestreams for {self.name}: {self.not_livestreams}")
-        # This is technically redundant since we have the
-        # info from the RSS ... but incase you don't wanna deal with fully rewritting the
-        # code for this part, as this is only a 2 quota query.
+                    elif actual_start_time is None:
+                        continue
+                    if video_id not in self.livestreams:
+                        self.livestreams.append(video_id)
+                else:
+                    self.not_livestreams.append(video_id)
+                    if video_id in self.livestreams:
+                        self.livestreams.remove(video_id)
+
         log.debug("YouTube %s: livestreams=%s", self.name, self.livestreams)
         if self.livestreams:
             params = {
