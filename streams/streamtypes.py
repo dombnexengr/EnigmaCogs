@@ -130,7 +130,14 @@ class YoutubeStream(Stream):
         self.id = kwargs.pop("id", None)
         self._token = kwargs.pop("token", None)
         self._config = kwargs.pop("config")
-        self.not_livestreams: List[str] = []
+        # Persist the not_livestreams cache across reloads so we don't re-check
+        # every RSS video on restart (saves ~1 API unit per channel per reload).
+        # Cap at 50 entries — the RSS feed only shows 15 videos so anything older
+        # than that will never appear again.
+        raw_not_live = kwargs.pop("not_livestreams", [])
+        self.not_livestreams: List[str] = raw_not_live[-50:] if raw_not_live else []
+        # Reset livestreams on reload so we re-announce after a restart.
+        kwargs.pop("livestreams", None)
         self.livestreams: List[str] = []
 
         super().__init__(**kwargs)
@@ -213,8 +220,14 @@ class YoutubeStream(Stream):
                     if scheduled is not None and actual_start_time is None:
                         scheduled = parse_time(scheduled)
                         if (scheduled - datetime.now(timezone.utc)).total_seconds() < -3600:
+                            # Scheduled more than 1 hour ago and never started —
+                            # treat as non-livestream so we stop re-checking it.
+                            self.not_livestreams.append(video_id)
                             continue
                     elif actual_start_time is None:
+                        # Has liveStreamingDetails but no start time at all —
+                        # treat as non-livestream so we stop re-checking it.
+                        self.not_livestreams.append(video_id)
                         continue
                     if video_id not in self.livestreams:
                         self.livestreams.append(video_id)
