@@ -47,6 +47,7 @@ TROVO_CHANNELINFO_ENDPOINT = TROVO_BASE_URL + "/channels/id"
 
 KICK_BASE_URL = "https://kick.com/api/v2"
 KICK_CHANNELS_ENDPOINT = KICK_BASE_URL + "/channels/"
+KICK_V1_CHANNELS_ENDPOINT = "https://kick.com/api/v1/channels/"
 
 TIKTOK_LIVE_URL = "https://www.tiktok.com/@{username}/live"
 
@@ -574,37 +575,69 @@ class KickStream(Stream):
     token_name = None
     platform_name = "Kick"
 
-    async def is_online(self):
-        # Use the JSON API directly — curl_cffi impersonates Chrome's TLS fingerprint
-        # so Cloudflare lets the request through just like a real browser.
-        url = KICK_CHANNELS_ENDPOINT + self.name.lower()
+    async def _fetch_kick(self, url: str):
+        """Fetch a Kick URL and return (status_code, parsed_json)."""
         if _CURL_AVAILABLE:
             async with _CurlSession(impersonate="chrome120") as session:
                 r = await session.get(url, allow_redirects=True)
                 status = r.status_code
                 try:
-                    data = json.loads(r.text)
+                    return status, json.loads(r.text)
                 except (json.JSONDecodeError, ValueError):
-                    log.debug("Kick %s: non-JSON response (status %d)", self.name, status)
-                    raise APIError(status, {})
+                    log.debug("Kick %s: non-JSON body (HTTP %d): %.300s", self.name, status, r.text)
+                    return status, {}
         else:
             async with aiohttp.ClientSession(headers=_BROWSER_HEADERS) as session:
                 async with session.get(url, allow_redirects=True) as r:
-                    status = r.status
                     try:
-                        data = await r.json()
+                        return r.status, await r.json(content_type=None)
                     except Exception:
-                        raise APIError(status, {})
+                        return r.status, {}
+
+    async def is_online(self):
+        slug = self.name.lower()
+
+        # Try v2 first, fall back to v1 — Kick has been gradually
+        # deprecating v2 for some response fields.
+        status, data = await self._fetch_kick(KICK_CHANNELS_ENDPOINT + slug)
 
         if status == 404:
             raise StreamNotFound()
         if status != 200:
-            log.debug("Kick %s: HTTP %d", self.name, status)
+            log.debug("Kick %s: v2 HTTP %d", self.name, status)
             raise APIError(status, {})
 
-        if not data.get("livestream"):
+        log.debug("Kick %s: v2 keys=%s  livestream=%r",
+                  self.name, list(data.keys()), data.get("livestream"))
+
+        # Some v2 responses wrap everything under a "data" key
+        if "data" in data and isinstance(data.get("data"), dict):
+            data = data["data"]
+
+        livestream = data.get("livestream") or data.get("current_livestream")
+
+        # v2 didn't return a livestream object — try v1 which is more complete
+        if not livestream:
+            status1, data1 = await self._fetch_kick(KICK_V1_CHANNELS_ENDPOINT + slug)
+            log.debug("Kick %s: v1 HTTP %d  keys=%s  livestream=%r",
+                      self.name, status1, list(data1.keys()) if data1 else [],
+                      data1.get("livestream") if data1 else None)
+            if status1 == 200 and data1:
+                livestream = data1.get("livestream") or data1.get("current_livestream")
+                # v1 enriches the channel data; merge what we need for make_embed
+                if not data.get("user"):
+                    data["user"] = data1.get("user") or {}
+                if not data.get("followers_count") and data1.get("followersCount"):
+                    data["followers_count"] = data1["followersCount"]
+
+        if not livestream:
             raise OfflineStream()
 
+        # Normalise viewer count field name (v1 uses "viewers", v2 "viewer_count")
+        if "viewers" in livestream and "viewer_count" not in livestream:
+            livestream["viewer_count"] = livestream["viewers"]
+
+        data["livestream"] = livestream
         self.retry_count = 0
         return self.make_embed(data)
 
