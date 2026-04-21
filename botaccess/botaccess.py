@@ -24,7 +24,7 @@ SOFTWARE.
 
 import typing
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import discord
 from redbot.core import commands, Config
@@ -75,10 +75,14 @@ class BotAccess(commands.Cog):
         self.config.register_global(**default_global)
         self.config.register_user(**default_user)
 
-        self.expire_handler_task = self.bot.loop.create_task(self._expire_handler())
+        self.expire_handler_task: typing.Optional[asyncio.Task] = None
+
+    async def cog_load(self):
+        self.expire_handler_task = asyncio.create_task(self._expire_handler())
 
     def cog_unload(self):
-        self.expire_handler_task.cancel()
+        if self.expire_handler_task:
+            self.expire_handler_task.cancel()
 
     @commands.Cog.listener("on_guild_join")
     async def _guild_join(self, guild: discord.Guild):
@@ -175,7 +179,7 @@ class BotAccess(commands.Cog):
                 if after.guild.id in user_settings["supporting_in"]:
                     user_settings["supporting_in"].remove(after.guild.id)
                 if not user_settings["supporting_in"] and not user_settings["end_timestamp"]:
-                    to_send = await self._send_expire(messages["expire"])
+                    to_send = self._send_expire(messages["expire"])
                     auto_leave = True
 
         # Try sending DM
@@ -208,12 +212,9 @@ class BotAccess(commands.Cog):
         return None
 
     @staticmethod
-    async def _send_expire(message: dict):
+    def _send_expire(message: dict):
         if message["toggle"]:
-            if not message["content"]:
-                return EXPIRE
-            else:
-                return message["content"]
+            return message["content"] if message["content"] else EXPIRE
         return None
 
     @commands.group(name="botaccess")
@@ -225,9 +226,17 @@ class BotAccess(commands.Cog):
         """View and modify your current BotAccess server(s)."""
         user_settings = await self.config.user(ctx.author).all()
         if user_settings["supporting_in"]:
+            servers = user_settings["servers"]
+            description = (
+                humanize_list([
+                    f'`{gu.name}` (`{g}`)' if (gu := self.bot.get_guild(g)) else f'`{g}`'
+                    for g in servers
+                ])
+                if servers else "You have not added any BotAccess servers yet."
+            )
             await ctx.send(embed=discord.Embed(
                 title="BotAccess Servers",
-                description=f"{humanize_list([f'`{gu.name}` (`{g}`)' if (gu := self.bot.get_guild(g)) else f'`{g}`' for g in user_settings['servers']])}",
+                description=description,
                 color=await ctx.embed_color()
             ))
             await ctx.send_help()
@@ -492,7 +501,7 @@ class BotAccess(commands.Cog):
         auto_leave = await self.config.auto_leave()
         if not auto_leave["toggle"]:
             return
-        end_timestamp = (datetime.now()+timedelta(hours=auto_leave["delay"])).timestamp()
+        end_timestamp = (datetime.now(timezone.utc) + timedelta(hours=auto_leave["delay"])).timestamp()
         await self.config.user_from_id(user_id).end_timestamp.set(end_timestamp)
         if start_timer:
             await self._expire_timer(user_id, end_timestamp)
@@ -516,24 +525,27 @@ class BotAccess(commands.Cog):
             for r in main_server_settings[str(guild.id)]:
                 if role := guild.get_role(r):
                     async for member in AsyncIter(role.members, steps=100):
-                        if cur := refreshed_settings.get(str(member.id)):
+                        member_id_str = str(member.id)
+                        if cur := refreshed_settings.get(member_id_str):
                             cur["supporting_in"].append(guild.id)
-                            refreshed_settings[str(member.id)] = {
+                            refreshed_settings[member_id_str] = {
                                 "supporting_in": cur["supporting_in"],
                                 "servers": cur["servers"],
                                 "end_timestamp": cur["end_timestamp"]
                             }
-                        elif orig := original_settings.get(member.id):
-                            original_users.remove(member.id)
-                            refreshed_settings[str(member.id)] = {
+                        elif orig := original_settings.get(member_id_str):
+                            # Existing supporter — preserve their servers and timestamps
+                            original_users.remove(member_id_str)
+                            refreshed_settings[member_id_str] = {
                                 "supporting_in": [guild.id],
                                 "servers": orig["servers"],
                                 "end_timestamp": orig["end_timestamp"]
                             }
                         else:
+                            # Brand new supporter
                             new_users.append(member)
                             new_user_ids.append(member.id)
-                            refreshed_settings[str(member.id)] = {
+                            refreshed_settings[member_id_str] = {
                                 "supporting_in": [guild.id],
                                 "servers": [],
                                 "end_timestamp": None
@@ -548,7 +560,7 @@ class BotAccess(commands.Cog):
 
         messages = await self.config.messages()
         thanks = await self._send_thanks(messages["thanks"])
-        expire = await self._send_expire(messages["expire"])
+        expire = self._send_expire(messages["expire"])
 
         # New users
         if thanks:
@@ -558,14 +570,14 @@ class BotAccess(commands.Cog):
                 except discord.HTTPException:
                     pass
 
-        # Expired users
+        # Expired users (user_id is a string from config keys)
         async for user_id in AsyncIter(original_users, steps=100):
             try:
-                user = await self.bot.get_or_fetch_user(user_id)
+                user = await self.bot.get_or_fetch_user(int(user_id))
                 if not original_settings.get(user_id)["end_timestamp"]:
                     if expire:
                         await user.send(expire)
-                    await self._initiate_autoleave(user_id, start_timer=False)
+                    await self._initiate_autoleave(int(user_id), start_timer=False)
             except discord.HTTPException:
                 pass
 
@@ -586,7 +598,9 @@ class BotAccess(commands.Cog):
             pass
 
     async def _expire_timer(self, user_id: int, end_timestamp: float):
-        seconds_left = (datetime.fromtimestamp(end_timestamp) - datetime.now()).total_seconds()
+        seconds_left = (
+            datetime.fromtimestamp(end_timestamp, tz=timezone.utc) - datetime.now(timezone.utc)
+        ).total_seconds()
         if seconds_left > 0:
             await asyncio.sleep(seconds_left)
         await self._expire_leave(user_id)
@@ -596,7 +610,7 @@ class BotAccess(commands.Cog):
         main_servers = await self.config.main_servers()
         allowed = await self.config.allowed()
         if user_settings["end_timestamp"] and not user_settings["supporting_in"]:
-            if datetime.fromtimestamp(user_settings["end_timestamp"]) <= datetime.now():
+            if datetime.fromtimestamp(user_settings["end_timestamp"], tz=timezone.utc) <= datetime.now(timezone.utc):
                 for guild in user_settings["servers"]:
                     if g := self.bot.get_guild(guild):
                         if g.id not in allowed and str(g.id) not in main_servers.keys():
