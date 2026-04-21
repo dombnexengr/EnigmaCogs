@@ -574,38 +574,27 @@ class KickStream(Stream):
     token_name = None
     platform_name = "Kick"
 
-    # Kick's JSON API is behind strict Cloudflare protection; scraping the channel
-    # page HTML is served with a lighter CF tier and embeds the same data in
-    # __NEXT_DATA__ (Next.js SSR).
-    _HEADERS = {
-        **_BROWSER_HEADERS,
-        "Accept": (
-            "text/html,application/xhtml+xml,application/xml;q=0.9,"
-            "image/avif,image/webp,*/*;q=0.8"
-        ),
-        "Referer": "https://kick.com/",
-        "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"Windows"',
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Upgrade-Insecure-Requests": "1",
-    }
-
     async def is_online(self):
-        url = f"https://kick.com/{self.name.lower()}"
+        # Use the JSON API directly — curl_cffi impersonates Chrome's TLS fingerprint
+        # so Cloudflare lets the request through just like a real browser.
+        url = KICK_CHANNELS_ENDPOINT + self.name.lower()
         if _CURL_AVAILABLE:
-            # curl_cffi impersonates Chrome's TLS fingerprint, bypassing Cloudflare
             async with _CurlSession(impersonate="chrome120") as session:
                 r = await session.get(url, allow_redirects=True)
                 status = r.status_code
-                html = r.text
+                try:
+                    data = json.loads(r.text)
+                except (json.JSONDecodeError, ValueError):
+                    log.debug("Kick %s: non-JSON response (status %d)", self.name, status)
+                    raise APIError(status, {})
         else:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=self._HEADERS, allow_redirects=True) as r:
+            async with aiohttp.ClientSession(headers=_BROWSER_HEADERS) as session:
+                async with session.get(url, allow_redirects=True) as r:
                     status = r.status
-                    html = await r.text()
+                    try:
+                        data = await r.json()
+                    except Exception:
+                        raise APIError(status, {})
 
         if status == 404:
             raise StreamNotFound()
@@ -613,25 +602,11 @@ class KickStream(Stream):
             log.debug("Kick %s: HTTP %d", self.name, status)
             raise APIError(status, {})
 
-        match = re.search(
-            r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
-            html,
-            re.DOTALL,
-        )
-        if not match:
-            raise OfflineStream()
-
-        try:
-            page_props = json.loads(match.group(1))["props"]["pageProps"]
-            channel_data = page_props["channel"]
-        except (json.JSONDecodeError, KeyError, TypeError):
-            raise OfflineStream()
-
-        if not channel_data.get("livestream"):
+        if not data.get("livestream"):
             raise OfflineStream()
 
         self.retry_count = 0
-        return self.make_embed(channel_data)
+        return self.make_embed(data)
 
     def make_embed(self, data: dict):
         livestream = data["livestream"]
