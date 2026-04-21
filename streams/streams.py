@@ -604,25 +604,36 @@ class Streams(commands.Cog):
 
         await ctx.maybe_send_embed(message)
 
-    @streamset.command()
+    @streamset.command(usage="[channel]")
     @checks.is_owner()
-    async def youtubetest(self, ctx: commands.Context):
-        """Test the currently configured YouTube API key and show the raw result."""
+    async def youtubetest(self, ctx: commands.Context, channel: str = "@YouTube"):
+        """Test the YouTube API key against a specific channel.
+
+        Pass a handle like `@LofiGirl`, a channel ID like `UCxxxxxx`, or
+        leave blank to test with `@YouTube`.
+        """
         apikey = await self.bot.get_shared_api_tokens("youtube")
         key = apikey.get("api_key", "")
         if not key:
             await ctx.send("❌ No YouTube API key is set. Use `[p]set api youtube api_key YOUR_KEY`.")
             return
 
-        # Show the key suffix so the user can confirm it's the right key
         masked = f"{'*' * (len(key) - 6)}{key[-6:]}" if len(key) > 6 else "***"
-        await ctx.send(f"🔑 Key currently loaded: `{masked}`\nTesting against Google API...")
 
-        params = {
-            "key": key,
-            "part": "id",
-            "forHandle": "@YouTube",
-        }
+        # Choose the right lookup parameter
+        is_channel_id = bool(self.yt_cid_pattern.fullmatch(channel))
+        if is_channel_id:
+            params = {"key": key, "part": "snippet", "id": channel}
+            method = f"id=`{channel}`"
+        elif channel.startswith("@"):
+            params = {"key": key, "part": "snippet", "forHandle": channel}
+            method = f"forHandle=`{channel}`"
+        else:
+            params = {"key": key, "part": "snippet", "forUsername": channel}
+            method = f"forUsername=`{channel}`"
+
+        await ctx.send(f"🔑 Key: `{masked}`\n🔍 Looking up {method}…")
+
         async with aiohttp.ClientSession() as session:
             async with session.get(
                 "https://www.googleapis.com/youtube/v3/channels", params=params
@@ -633,12 +644,7 @@ class Streams(commands.Cog):
                 except Exception:
                     data = {}
 
-        if status == 200:
-            await ctx.send(
-                f"✅ **API key works!** Google returned HTTP 200.\n"
-                f"Items found: `{len(data.get('items', []))}`"
-            )
-        elif "error" in data:
+        if "error" in data:
             err = data["error"]
             reason = err.get("errors", [{}])[0].get("reason", "unknown")
             message_text = err.get("message", "No message")
@@ -647,8 +653,30 @@ class Streams(commands.Cog):
                 f"Reason: `{reason}`\n"
                 f"Message: `{message_text}`"
             )
-        else:
-            await ctx.send(f"⚠️ Unexpected response (HTTP {status}): `{str(data)[:300]}`")
+            return
+
+        if status != 200:
+            await ctx.send(f"⚠️ Unexpected HTTP {status}: `{str(data)[:300]}`")
+            return
+
+        items = data.get("items", [])
+        if not items:
+            total = data.get("pageInfo", {}).get("totalResults", "?")
+            await ctx.send(
+                f"⚠️ **API returned 200 but found 0 channels.**\n"
+                f"`totalResults={total}` — the channel name/ID was not recognised by Google.\n"
+                f"Double-check the handle or ID is correct."
+            )
+            return
+
+        ch = items[0]
+        title = ch.get("snippet", {}).get("title", "unknown")
+        ch_id = ch.get("id", "unknown")
+        await ctx.send(
+            f"✅ **Channel found!**\n"
+            f"Name: **{title}**\n"
+            f"ID: `{ch_id}`"
+        )
 
     @streamset.command()
     @checks.is_owner()
