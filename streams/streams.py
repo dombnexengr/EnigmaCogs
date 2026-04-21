@@ -31,6 +31,7 @@ import logging
 import asyncio
 import aiohttp
 import contextlib
+import time
 from datetime import datetime
 from collections import defaultdict
 from typing import Optional, List, Tuple, Union, Dict
@@ -82,6 +83,8 @@ class Streams(commands.Cog):
         self.task: Optional[asyncio.Task] = None
 
         self.yt_cid_pattern = re.compile("^UC[-_A-Za-z0-9]{21}[AQgw]$")
+        # Timestamp after which YouTube checks may resume (set when quota is exceeded)
+        self._yt_quota_exceeded_until: float = 0.0
 
     async def red_delete_data_for_user(self, **kwargs):
         """Nothing to delete"""
@@ -107,6 +110,20 @@ class Streams(commands.Cog):
     async def on_red_api_tokens_update(self, service_name, api_tokens):
         if service_name == "twitch":
             await self.get_twitch_bearer_token(api_tokens)
+        elif service_name == "youtube":
+            # Push the new key into every already-loaded YoutubeStream object so a
+            # cog reload is not required for the change to take effect.
+            yt_streams = [s for s in self.streams if s.__class__.__name__ == "YoutubeStream"]
+            for stream in yt_streams:
+                stream._token = api_tokens
+            # A new key means a fresh project — clear any quota-exceeded pause.
+            self._yt_quota_exceeded_until = 0.0
+            key = api_tokens.get("api_key", "")
+            log.info(
+                "YouTube API key updated (suffix=...%s) — refreshed %d stream object(s).",
+                key[-6:] if key else "NONE",
+                len(yt_streams),
+            )
 
     async def move_api_keys(self) -> None:
         """Move the API keys from cog stored config to core bot config if they exist."""
@@ -854,10 +871,20 @@ class Streams(commands.Cog):
                         embed, is_rerun = await stream.is_online()
 
                     elif stream.__class__.__name__ == "YoutubeStream":
+                        # Skip this channel while quota is exhausted.
+                        if time.time() < self._yt_quota_exceeded_until:
+                            continue
                         embed, is_schedule = await stream.is_online()
 
                     else:
                         embed = await stream.is_online()
+                except YoutubeQuotaExceeded:
+                    # Back off for 1 hour so we stop burning quota on every loop tick.
+                    self._yt_quota_exceeded_until = time.time() + 3600
+                    log.warning(
+                        "YouTube quota exceeded — pausing all YouTube stream checks for 1 hour."
+                    )
+                    continue
                 except StreamNotFound:
                     if stream.retry_count > MAX_RETRY_COUNT:
                         log.info("Stream with name %s no longer exists. Removing...", stream.name)

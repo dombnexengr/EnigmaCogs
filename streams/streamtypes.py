@@ -139,6 +139,14 @@ class YoutubeStream(Stream):
         if not self._token:
             raise InvalidYoutubeCredentials("YouTube API key is not set.")
 
+        key = self._token.get("api_key", "") if self._token else ""
+        log.debug(
+            "YouTube %s: using API key prefix=%s... suffix=...%s",
+            self.name,
+            key[:4] if key else "NONE",
+            key[-4:] if key else "NONE",
+        )
+
         if not self.id:
             self.id = await self.fetch_id()
         elif not self.name:
@@ -339,6 +347,14 @@ class YoutubeStream(Stream):
                 "quotaExceeded",
                 "rateLimitExceeded",
             ):
+                key = self._token.get("api_key", "") if self._token else ""
+                log.warning(
+                    "YouTube quota exceeded for channel %s — API key suffix=...%s  "
+                    "reason=%s",
+                    self.name,
+                    key[-6:] if key else "NONE",
+                    data["error"]["errors"][0]["reason"],
+                )
                 raise YoutubeQuotaExceeded()
             raise APIError(error_code, data)
 
