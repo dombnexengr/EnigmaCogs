@@ -1,0 +1,33 @@
+{
+    "author": [
+        "DombNexen"
+    ],
+    "description": "Monitor the public 3DXChat status endpoint with one editable Discord message, optional presence, and state-change alerts.",
+    "disabled": false,
+    "end_user_data_statement": "This cog stores only per-server configuration such as channel IDs, message IDs, and alert settings. It does not store member or user data.",
+    "hidden": false,
+    "install_msg": "Use `[p]3dxstatus setup #channel` to create one editable status message. Use `[p]3dxstatus alerts true` for transition-only alerts and `[p]3dxstatus presence true` as the bot owner for presence updates.",
+    "min_bot_version": "3.5.0",
+    "min_python_version": [
+        3,
+        8,
+        1
+    ],
+    "permissions": [
+        "embed_links",
+        "read_message_history",
+        "send_messages"
+    ],
+    "required_cogs": {},
+    "requirements": [
+        "aiohttp"
+    ],
+    "short": "3DXChat service status monitor",
+    "tags": [
+        "3dxchat",
+        "status",
+        "monitoring",
+        "alerts"
+    ],
+    "type": "COG"
+}
