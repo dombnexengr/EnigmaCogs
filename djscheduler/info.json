@@ -1,0 +1,30 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Cog-Creators/Red-DiscordBot/V3/develop/schema/red_cog.schema.json",
+  "author": [
+    "dombn"
+  ],
+  "name": "DJScheduler",
+  "short": "DJ slot signups by the hour, shown in EST, CET and PST.",
+  "description": "Pick a day, decide how many slots each hour has, and let DJs claim the hour they want with a slot number. The bot keeps a live board in your channel and announces every booking, with each time shown in Eastern, Central European and Pacific time at once.",
+  "install_msg": "Set your timezone and board channel first:\n`[p]dj set timezone EST`\n`[p]dj set board #channel`\nThen open a day: `[p]dj create friday 18:00 02:00 2`",
+  "requirements": [
+    "tzdata"
+  ],
+  "tags": [
+    "dj",
+    "schedule",
+    "slots",
+    "music",
+    "signup"
+  ],
+  "min_bot_version": "3.5.0",
+  "hidden": false,
+  "disabled": false,
+  "type": "COG",
+  "end_user_data_statement": "This cog stores Discord user IDs in claimed or assigned DJ slots, together with the schedule date and slot time. Stored claims are cleared when dropped or cleared, when their day is deleted, or through a Red data deletion request. Tracked live boards are refreshed after data deletion when accessible. Previously posted Discord announcements and copied boards are not automatically purged.",
+  "min_python_version": [
+    3,
+    9,
+    0
+  ]
+}
