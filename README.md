@@ -2,7 +2,6 @@
 
 [![Red](https://img.shields.io/badge/Red-DiscordBot-red.svg)](https://github.com/Cog-Creators/Red-DiscordBot/tree/V3/develop)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/ambv/black)
-[![pre-commit.ci status](https://results.pre-commit.ci/badge/github/Zephyrkul/FluffyCogs/master.svg)](https://results.pre-commit.ci/latest/github/Zephyrkul/FluffyCogs/master)
 
 
 
@@ -20,6 +19,21 @@ To install:
 > 
 > [p]help <cog_name>
 
+
+## DJ Scheduler
+
+[DJScheduler](djscheduler/README.md) provides hourly DJ signups, live schedule boards,
+optional role restrictions and booking announcements. Times appear in Eastern,
+Central European and Pacific time, including daylight-saving adjustments.
+
+After adding this repository:
+
+```text
+[p]cog install EnigmaCogs djscheduler
+[p]load djscheduler
+```
+
+See the [setup guide and command list](djscheduler/README.md).
 
 ## Credits
 
